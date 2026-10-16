@@ -20,6 +20,13 @@
       <input type="number" id="hEnd" min="1" max="24" value="18" disabled>
     </div>
 
+    <div class="seg-ctl" id="statusFilter">
+      <button data-status="" class="on">全部</button>
+      <button data-status="todo">待办</button>
+      <button data-status="doing">进行中</button>
+      <button data-status="done">已完成</button>
+    </div>
+
     <span class="spacer"></span>
 
     <button class="text-btn" id="btnSummary">
@@ -144,6 +151,9 @@
     </div>
   </div>
 </div>
+<!-- 右键快捷菜单。同一个容器复用,每次打开时按目标重新填内容 -->
+<div class="ctx-menu" id="ctxMenu" hidden></div>
+
 <script src="app.js"></script>
 </body>
 </html>

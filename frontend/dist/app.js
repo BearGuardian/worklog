@@ -53,7 +53,14 @@
     dayStart: 9,
     dayEnd: 18,
     span: 9,
+    // 状态视角。空串 = 全部。只看不影响数据,只影响画什么
+    statusFilter: '',
   };
+
+  // 当前视角下可见的事项。时间轴、甘特图、每日合计都走它;
+  // 统计条不走 —— 那四个数字是整周的概览,不该被视角改掉。
+  const visible = () =>
+    (state.statusFilter ? state.tasks.filter((t) => t.status === state.statusFilter) : state.tasks);
 
   const TODAY = new Date();
   const W0 = mondayOf(TODAY);
@@ -91,7 +98,7 @@
   function refreshRange() {
     if (state.autoRange) {
       let lo = 24 * 60, hi = 0;
-      state.tasks.forEach((t) => { lo = Math.min(lo, t.startMin); hi = Math.max(hi, t.endMin); });
+      visible().forEach((t) => { lo = Math.min(lo, t.startMin); hi = Math.max(hi, t.endMin); });
 
       const todayInWeek = iso(TODAY) >= iso(weekStart()) && iso(TODAY) < iso(new Date(weekStart().getTime() + 7 * DAY));
       if (todayInWeek) {
@@ -124,7 +131,7 @@
   }
 
   function tasksOn(dateISO) {
-    return state.tasks.filter((t) => segsOf(t, dateISO).length > 0);
+    return visible().filter((t) => segsOf(t, dateISO).length > 0);
   }
 
   // 一条事项落在某一天的区间。
@@ -157,7 +164,7 @@
   // 一天里实际投入的分钟数(按时段算,不是按整条事项的时长)
   function dayMinutes(dateISO) {
     let m = 0;
-    state.tasks.forEach((t) => {
+    visible().forEach((t) => {
       segsOf(t, dateISO).forEach((s) => { if (!s.plan) m += s.end - s.start; });
     });
     return m;
@@ -216,7 +223,7 @@
   // 同一块,再画一条淡色底只是叠了一层没用的颜色。
   function dayItems(dateISO) {
     const out = [];
-    state.tasks.forEach((t) => {
+    visible().forEach((t) => {
       const segs = segsOf(t, dateISO);
       if (!segs.length) return;
 
@@ -269,6 +276,7 @@
         if (t.id === state.selectedId) node.classList.add('sel');
         node.onclick = (e) => {
           e.stopPropagation();
+          hideCtx();
           state.selectedId = t.id;
           renderGantt(); renderDetail();
           bridge.GetTask(t.id).then((full) => {
@@ -278,6 +286,15 @@
           }).catch(() => {});
         };
         node.ondblclick = (e) => { e.stopPropagation(); openEdit(t); };
+        // 右键 = 选中 + 弹快捷菜单。先选中,菜单里的操作才有明确的目标,
+        // 详情栏也会同步显示这条,不会出现"菜单在操作 A、详情栏是 B"。
+        node.oncontextmenu = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          state.selectedId = t.id;
+          renderGantt(); renderDetail();
+          openCtx(t, e.clientX, e.clientY);
+        };
       };
 
       items.forEach((it) => {
@@ -330,6 +347,16 @@
         }
       }
       body.appendChild(col);
+    }
+
+    // 切了视角之后这一周可能是空的,给句话,否则看着像坏了
+    if (!visible().length) {
+      const hint = document.createElement('div');
+      hint.className = 'gantt-empty';
+      hint.textContent = state.statusFilter
+        ? `这一周没有「${STATUS_LABEL[state.statusFilter]}」的事项`
+        : '这一周还没有记录';
+      body.appendChild(hint);
     }
   }
 
@@ -824,6 +851,130 @@
     const idx = Array.from({ length: 7 }, (_, i) => i).find(isToday);
     openEdit(null, idx != null ? idx : 0);
   };
+
+  // ---------------------------------------------------------------- 状态视角
+  //
+  // 切视角只改"画什么",不动数据。选中项如果被过滤掉了就一并取消选中,
+  // 否则详情栏会一直显示一条在当前视角里看不见的事项。
+  function renderStatusFilter() {
+    el('statusFilter').querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.status === state.statusFilter);
+    });
+  }
+
+  el('statusFilter').onclick = (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    state.statusFilter = btn.dataset.status || '';
+    const sel = selected();
+    if (sel && state.statusFilter && sel.status !== state.statusFilter) {
+      state.selectedId = null;
+    }
+    renderStatusFilter();
+    refreshRange();
+    renderAll();
+  };
+  renderStatusFilter();
+
+  // ---------------------------------------------------------------- 右键菜单
+  //
+  // 右键某个任务块直接操作,不用先选中再点详情栏。菜单内容跟着状态走:
+  // 待办给"开始",跑着的给"暂停",暂停中的给"继续"。
+  const ctxMenu = el('ctxMenu');
+
+  function hideCtx() {
+    ctxMenu.hidden = true;
+    ctxMenu.innerHTML = '';
+  }
+
+  function ctxItems(t) {
+    const out = [];
+    if (t.status === 'doing') {
+      out.push(t.running ? { k: 'pause', label: '暂停' } : { k: 'resume', label: '继续' });
+      out.push({ k: 'finish', label: '结束并确认耗时' });
+    } else if (t.status === 'todo') {
+      out.push({ k: 'start', label: '开始计时' });
+      out.push({ k: 'finish', label: '直接结束' });
+    } else {
+      out.push({ k: 'restart', label: '重新开始' });
+    }
+    out.push({ sep: true });
+    out.push({ k: 'edit', label: '编辑', hint: '双击' });
+    out.push({ k: 'delete', label: '删除', danger: true });
+    return out;
+  }
+
+  function openCtx(t, x, y) {
+    ctxMenu.innerHTML =
+      `<div class="ct-title">${esc(t.title)}</div>` +
+      ctxItems(t).map((it) => it.sep
+        ? '<div class="ct-sep"></div>'
+        : `<button data-k="${it.k}"${it.danger ? ' class="danger"' : ''}>${it.label}${
+            it.hint ? `<span class="k">${it.hint}</span>` : ''}</button>`).join('');
+    ctxMenu.hidden = false;
+
+    // 先显示再量尺寸,才能把它夹在视口里 —— 否则贴着右下角右键会跑出屏幕
+    const r = ctxMenu.getBoundingClientRect();
+    ctxMenu.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 8)) + 'px';
+    ctxMenu.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 8)) + 'px';
+  }
+
+  ctxMenu.onclick = async (e) => {
+    const btn = e.target.closest('button[data-k]');
+    if (!btn) return;
+    const k = btn.dataset.k;
+    const t = selected();
+    if (!t) { hideCtx(); return; }
+
+    // 删除要点两次。右键顺手删掉一条记录太容易了,而这是不可撤销的
+    if (k === 'delete' && !btn.classList.contains('arming')) {
+      btn.classList.add('arming');
+      btn.textContent = '再点一次确认删除';
+      return;
+    }
+    hideCtx();
+
+    try {
+      switch (k) {
+        case 'pause':
+          replaceTask(await bridge.PauseTask(t.id));
+          renderAll();
+          break;
+        case 'start':
+        case 'resume':
+        case 'restart':
+          replaceTask(await bridge.SetTaskStatus(t.id, 'doing'));
+          renderAll();
+          break;
+        case 'finish':
+          confirmDuration(t);
+          break;
+        case 'edit':
+          openEdit(t);
+          break;
+        case 'delete':
+          await bridge.DeleteTask(t.id);
+          if (state.selectedId === t.id) state.selectedId = null;
+          await reload();
+          break;
+      }
+    } catch (err) { reportError('操作失败')(err); }
+  };
+
+  // 点别处 / 按 Esc / 滚轮 / 窗口失焦都关掉菜单。
+  // 不关的话它会一直挂在那儿,看着像卡住了。
+  document.addEventListener('click', (e) => { if (!ctxMenu.contains(e.target)) hideCtx(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideCtx(); });
+  document.addEventListener('scroll', hideCtx, true);
+  window.addEventListener('resize', hideCtx);
+  window.addEventListener('blur', hideCtx);
+
+  // 时间轴空白处的右键:吞掉 WebView2 自带的菜单(在这儿它没有意义),
+  // 顺手关掉我们自己的。任务块自己的处理里 stopPropagation 了,不会走到这。
+  el('ganttBody').addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    hideCtx();
+  });
 
   const autoBox = el('autoRange'), hS = el('hStart'), hE = el('hEnd');
   autoBox.onchange = () => {
