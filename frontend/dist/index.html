@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>worklog</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">worklog <small>本地工作事项</small></div>
+
+    <div class="range-ctl">
+      <span class="lbl">时间轴</span>
+      <label class="switch"><input type="checkbox" id="autoRange" checked><span>自动</span></label>
+      <input type="number" id="hStart" min="0" max="23" value="9" disabled>
+      <span class="dash">–</span>
+      <input type="number" id="hEnd" min="1" max="24" value="18" disabled>
+    </div>
+
+    <span class="spacer"></span>
+
+    <button class="text-btn" id="btnSummary">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14">
+        <rect x="1.5" y="8" width="3" height="6.5" rx="1"/>
+        <rect x="6.5" y="4.5" width="3" height="10" rx="1"/>
+        <rect x="11.5" y="1.5" width="3" height="13" rx="1"/>
+      </svg>汇总</button>
+    <button class="text-btn" id="btnCats">分类</button>
+    <button class="icon-btn" id="btnRefresh" title="刷新"></button>
+    <button class="icon-btn" id="btnTheme" title="切换深浅色"></button>
+
+    <div class="week-nav">
+      <button class="icon-btn" id="prev" title="上一周">‹</button>
+      <div class="range" id="rangeLabel"></div>
+      <button class="icon-btn" id="next" title="下一周">›</button>
+      <button class="text-btn" id="todayBtn">今天</button>
+    </div>
+
+    <button class="primary-btn" id="btnNew">+ 新建任务</button>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="hint" id="mcpHint">
+    <span class="dot"></span>
+    <span class="grow" id="mcpText">正在检查 Claude Code 接入状态…</span>
+    <code id="mcpCmd" hidden></code>
+    <button class="primary-btn" style="padding:6px 13px" id="mcpInstall" hidden>一键安装</button>
+  </div>
+
+  <div class="main">
+    <section class="panel">
+      <div class="gantt-head" id="ganttHead"></div>
+      <div class="gantt-body" id="ganttBody"></div>
+    </section>
+    <aside class="panel detail" id="detail"></aside>
+  </div>
+</div>
+
+<!-- 新建 / 编辑任务 -->
+<div class="overlay" id="editOverlay" hidden>
+  <div class="modal">
+    <h3 id="editTitle">新建任务</h3>
+
+    <label class="field"><span>标题</span>
+      <input id="fTitle" placeholder="做了什么" autocomplete="off">
+    </label>
+
+    <div class="field"><span>分类</span>
+      <div class="cat-input-wrap">
+        <input id="fCat" placeholder="选一个,或输入新名字(会自动建)" autocomplete="off">
+      </div>
+      <div class="cat-picks" id="catPicks"></div>
+    </div>
+
+    <div class="row three">
+      <label class="field"><span>日期</span><input type="date" id="fDate"></label>
+      <label class="field"><span>开始</span><input type="time" id="fStart"></label>
+      <label class="field"><span>结束</span><input type="time" id="fEnd"></label>
+    </div>
+
+    <div class="row">
+      <label class="field"><span>状态</span>
+        <select id="fStatus">
+          <option value="todo">待办</option>
+          <option value="doing">进行中</option>
+          <option value="done">已完成</option>
+        </select>
+      </label>
+      <label class="field"><span>时长</span><div class="ro" id="fDur">—</div></label>
+    </div>
+
+    <div class="modal-foot">
+      <button class="danger-btn" id="fDelete" hidden>删除</button>
+      <span class="grow"></span>
+      <button class="text-btn" id="fCancel">取消</button>
+      <button class="primary-btn" id="fSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 结束任务时确认耗时 -->
+<div class="overlay" id="durOverlay" hidden>
+  <div class="modal slim">
+    <h3>结束任务</h3>
+    <div class="big" id="durBig">1h15m</div>
+    <div class="sub" id="durSub">09:45 – 11:00 自动算出,可以改</div>
+    <div class="dur-edit">
+      <label class="field"><span>小时</span><input type="number" id="durH" min="0" max="23"></label>
+      <label class="field"><span>分钟</span><input type="number" id="durM" min="0" max="59" step="5"></label>
+    </div>
+    <div class="modal-foot">
+      <span class="grow"></span>
+      <button class="text-btn" id="durCancel">取消</button>
+      <button class="primary-btn" id="durOk">确认结束</button>
+    </div>
+  </div>
+</div>
+
+<!-- 分类维护 -->
+<div class="overlay" id="catOverlay" hidden>
+  <div class="modal" style="width:520px">
+    <h3>分类</h3>
+    <div class="cat-list" id="catList"></div>
+    <div class="modal-foot">
+      <button class="text-btn" id="catAdd">+ 新增分类</button>
+      <span class="grow"></span>
+      <button class="primary-btn" id="catDone">完成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 周汇总 -->
+<div class="overlay" id="sumOverlay" hidden>
+  <div class="modal wide">
+    <h3 id="sumTitle">本周汇总</h3>
+    <div class="sum-scroll" id="sumBody"></div>
+    <div class="modal-foot">
+      <span class="grow"></span>
+      <button class="primary-btn" id="sumClose">关闭</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

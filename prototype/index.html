@@ -1,0 +1,1331 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>worklog · 原型</title>
+<style>
+/* ============================================================ 主题令牌 */
+:root {
+  color-scheme: dark;
+
+  --bg:            #0a0b0f;
+  --glow1:         rgba(124, 107, 255, 0.13);
+  --glow2:         rgba(61, 220, 151, 0.075);
+
+  --panel-bg:      linear-gradient(180deg, #13151d, #0e1016);
+  --panel-solid:   #0e1016;
+  --modal-bg:      linear-gradient(180deg, #171a24, #12141b);
+
+  --surface:       rgba(255, 255, 255, 0.035);
+  --surface-hi:    rgba(255, 255, 255, 0.062);
+  --field-bg:      rgba(0, 0, 0, 0.30);
+  --border:        rgba(255, 255, 255, 0.075);
+  --border-hi:     rgba(255, 255, 255, 0.16);
+
+  --text:          #e9ebf2;
+  --text-dim:      #969db0;
+  --text-faint:    #5a6072;
+
+  --accent:        #7c6bff;
+  --accent-soft:   rgba(124, 107, 255, 0.16);
+  --accent-glow:   rgba(124, 107, 255, 0.42);
+
+  --done:          #3ddc97;
+  --todo:          #7b8496;
+  --danger:        #ff6b81;
+  --shadow:        0 8px 22px -10px rgba(0, 0, 0, 0.85);
+
+  --radius:        14px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display",
+          "Segoe UI", system-ui, "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg:            #f2f3f8;
+  --glow1:         rgba(124, 107, 255, 0.10);
+  --glow2:         rgba(47, 185, 138, 0.07);
+
+  --panel-bg:      linear-gradient(180deg, #ffffff, #fafbfe);
+  --panel-solid:   #fbfcfe;
+  --modal-bg:      linear-gradient(180deg, #ffffff, #f7f8fc);
+
+  --surface:       rgba(20, 25, 45, 0.035);
+  --surface-hi:    rgba(20, 25, 45, 0.06);
+  --field-bg:      rgba(20, 25, 45, 0.04);
+  --border:        rgba(20, 25, 45, 0.10);
+  --border-hi:     rgba(20, 25, 45, 0.20);
+
+  --text:          #171a22;
+  --text-dim:      #5b6273;
+  --text-faint:    #8d94a6;
+
+  --accent:        #6b58f0;
+  --accent-soft:   rgba(107, 88, 240, 0.10);
+  --accent-glow:   rgba(107, 88, 240, 0.30);
+
+  --done:          #12a06a;
+  --todo:          #8b93a5;
+  --danger:        #e0435c;
+  --shadow:        0 8px 22px -12px rgba(20, 25, 50, 0.28);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+/* 必须显式处理:.overlay 用了 display: grid,会覆盖 UA 默认的
+   [hidden] { display: none },导致弹层永远显示。 */
+[hidden] { display: none !important; }
+
+body {
+  font-family: var(--font); background: var(--bg); color: var(--text);
+  -webkit-font-smoothing: antialiased; overflow: hidden; font-size: 14px;
+  background-image:
+    radial-gradient(900px 520px at 12% -8%,  var(--glow1), transparent 62%),
+    radial-gradient(760px 460px at 92% 108%, var(--glow2), transparent 60%);
+  transition: background-color 200ms ease, color 200ms ease;
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ============================================================== 顶栏 */
+.topbar { display: flex; align-items: center; gap: 10px; padding: 18px 26px 14px; flex-shrink: 0; }
+
+.brand { display: flex; align-items: baseline; gap: 9px; font-size: 16px; font-weight: 640; letter-spacing: -0.015em; margin-right: 6px; }
+.brand::before {
+  content: ""; width: 9px; height: 9px; border-radius: 3px; align-self: center;
+  background: linear-gradient(135deg, var(--accent), var(--done));
+  box-shadow: 0 0 14px var(--accent-glow);
+}
+.brand small { font-size: 11px; font-weight: 500; color: var(--text-faint); }
+
+.range-ctl {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 10px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim);
+}
+.range-ctl .lbl { color: var(--text-faint); font-size: 11px; }
+.range-ctl input[type="number"] {
+  width: 40px; padding: 3px 4px; text-align: center;
+  font: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
+  color: var(--text); background: var(--field-bg);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.range-ctl input[type="number"]:disabled { opacity: 0.38; }
+.range-ctl input:focus { outline: none; border-color: var(--accent); }
+.range-ctl .dash { color: var(--text-faint); }
+
+.switch { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+.switch input { accent-color: var(--accent); cursor: pointer; }
+
+.spacer { flex: 1; }
+
+.week-nav { display: flex; align-items: center; gap: 3px; }
+.week-nav .range {
+  font-size: 14px; font-weight: 560; letter-spacing: -0.01em;
+  padding: 0 8px; min-width: 190px; text-align: center; font-variant-numeric: tabular-nums;
+}
+.week-nav .range em { font-style: normal; color: var(--text-faint); font-weight: 460; }
+
+.icon-btn {
+  width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+  background: transparent; border: 1px solid transparent; color: var(--text-dim);
+  cursor: pointer; font-size: 15px; transition: background 150ms, color 150ms, border-color 150ms;
+}
+.icon-btn:hover { background: var(--surface-hi); color: var(--text); border-color: var(--border); }
+.icon-btn svg { width: 15px; height: 15px; }
+
+.text-btn {
+  padding: 7px 13px; border-radius: 9px; font: inherit; font-size: 12.5px; font-weight: 520;
+  color: var(--text-dim); background: var(--surface); border: 1px solid var(--border);
+  cursor: pointer; transition: all 150ms; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.text-btn:hover { background: var(--surface-hi); color: var(--text); border-color: var(--border-hi); }
+
+.primary-btn {
+  padding: 7px 15px; border-radius: 9px; font: inherit; font-size: 12.5px; font-weight: 580;
+  color: #fff; border: 0; cursor: pointer; white-space: nowrap;
+  background: linear-gradient(180deg, #8d7dff, #6b58f0);
+  box-shadow: 0 4px 16px -4px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.18);
+  transition: filter 150ms, transform 150ms;
+}
+.primary-btn:hover { filter: brightness(1.08); }
+.primary-btn:active { transform: translateY(1px); }
+
+.danger-btn {
+  padding: 7px 14px; border-radius: 9px; font: inherit; font-size: 12.5px; font-weight: 520;
+  color: var(--danger); background: transparent;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  cursor: pointer; transition: all 150ms;
+}
+.danger-btn:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+/* ============================================================== 统计条 */
+.stats { display: flex; gap: 10px; padding: 0 26px 14px; flex-shrink: 0; }
+.stat {
+  display: flex; flex-direction: column; gap: 3px; padding: 12px 17px; min-width: 122px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.stat .num { font-size: 24px; font-weight: 620; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; line-height: 1; }
+.stat .num span { font-size: 12px; font-weight: 520; color: var(--text-faint); margin-left: 2px; }
+.stat .lbl { font-size: 11.5px; color: var(--text-faint); }
+.stat.accent .num { color: var(--accent); }
+.stat.done   .num { color: var(--done); }
+.stat.working { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 34%, transparent); }
+
+/* ============================================================== 提示条 */
+.hint {
+  margin: 0 26px 14px; padding: 10px 15px; display: flex; align-items: center; gap: 12px;
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--radius); font-size: 12.5px; color: var(--text-dim); flex-shrink: 0;
+}
+.hint .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent-glow); flex-shrink: 0; }
+.hint code { font-family: var(--mono); font-size: 11.5px; background: var(--field-bg); padding: 3px 8px; border-radius: 6px; color: var(--text); }
+.hint .grow { flex: 1; }
+
+/* ================================================================ 主体 */
+.main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 336px; gap: 14px; padding: 0 26px 20px; }
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; display: flex; flex-direction: column; min-height: 0;
+  transition: background 200ms ease;
+}
+
+/* =============================================================== 周视图 */
+.gantt-head { display: grid; grid-template-columns: 54px repeat(7, 1fr); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.gantt-head .gap { border-right: 1px solid var(--border); }
+
+.day-head { padding: 10px 11px 9px; border-right: 1px solid var(--border); cursor: pointer; transition: background 150ms; }
+.day-head:last-child { border-right: 0; }
+.day-head:hover { background: var(--surface); }
+.day-head .dow { font-size: 11.5px; color: var(--text-faint); font-weight: 520; }
+.day-head .dom { font-size: 15.5px; font-weight: 600; letter-spacing: -0.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.day-head .sum { font-size: 10.5px; color: var(--text-faint); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.day-head.today { background: var(--accent-soft); }
+.day-head.today .dow, .day-head.today .dom { color: var(--accent); }
+.day-head.weekend .dom { color: var(--text-dim); }
+
+.gantt-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 54px repeat(7, 1fr); }
+.hours { position: relative; border-right: 1px solid var(--border); }
+.hours .h { position: absolute; right: 8px; transform: translateY(-50%); font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.hours .h.last { transform: translateY(-100%); }
+
+.col { position: relative; border-right: 1px solid var(--border); cursor: crosshair; }
+.col:last-child { border-right: 0; }
+.col.weekend { background: var(--surface); }
+.col.today { background: linear-gradient(180deg, var(--accent-soft), transparent); }
+
+.col::before, .hours::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(to bottom, var(--border) 0 1px, transparent 1px);
+  background-size: 100% calc(100% / var(--hours));
+  background-repeat: repeat-y;
+  opacity: 0.55;
+}
+
+/* --- 任务块:左边框 = 分类色,状态靠亮度/光晕/虚实表达 --- */
+.blk {
+  position: absolute; border-radius: 8px; padding: 5px 7px 5px 9px;
+  background: var(--surface-hi);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cat, var(--todo));
+  cursor: pointer; overflow: hidden;
+  transition: transform 150ms, box-shadow 150ms, opacity 150ms;
+}
+.blk:hover { transform: translateY(-1px); box-shadow: var(--shadow); z-index: 5; opacity: 1; }
+.blk .t { font-size: 11px; font-weight: 540; line-height: 1.3; letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blk .m { font-size: 9.5px; color: var(--text-faint); margin-top: 2px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blk.short { padding: 3px 6px 3px 8px; }
+.blk.short .m { display: none; }
+
+.blk.doing {
+  background: linear-gradient(180deg,
+              color-mix(in srgb, var(--cat) 30%, transparent),
+              color-mix(in srgb, var(--cat) 13%, transparent));
+  border-color: color-mix(in srgb, var(--cat) 45%, transparent);
+  animation: breathe 3.4s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50%      { box-shadow: 0 0 0 3px color-mix(in srgb, var(--cat) 18%, transparent); }
+}
+.blk.done { opacity: 0.82; }
+.blk.done .t { color: var(--text-dim); }
+.blk.todo { opacity: 0.68; border-style: dashed; border-left-style: solid; }
+.blk.sel { outline: 2px solid var(--accent); outline-offset: 1px; opacity: 1; }
+
+.nowline { position: absolute; left: 0; right: 0; height: 0; z-index: 6; border-top: 1.5px solid var(--accent); pointer-events: none; box-shadow: 0 0 10px var(--accent-glow); }
+.nowline::before { content: ""; position: absolute; left: -4px; top: -4px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
+
+/* ============================================================== 详情栏 */
+.detail-head { padding: 15px 17px 13px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.detail-head .eyebrow { font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text-faint); font-weight: 600; }
+.detail-head h2 { font-size: 15.5px; font-weight: 600; line-height: 1.4; letter-spacing: -0.015em; margin-top: 7px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+.chip {
+  font-size: 11px; padding: 3px 9px; border-radius: 20px;
+  background: var(--surface-hi); border: 1px solid var(--border); color: var(--text-dim);
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.chip .swatch { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.chip.doing { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 34%, transparent); color: var(--accent); }
+.chip.done  { background: color-mix(in srgb, var(--done) 13%, transparent); border-color: color-mix(in srgb, var(--done) 30%, transparent); color: var(--done); }
+.chip.todo  { border-style: dashed; }
+
+.detail-stats { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.detail-stats div { padding: 11px 17px; }
+.detail-stats div + div { border-left: 1px solid var(--border); }
+.detail-stats .k { font-size: 10.5px; color: var(--text-faint); }
+.detail-stats .v { font-size: 15px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+
+.notes { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
+.notes::-webkit-scrollbar { width: 9px; }
+.notes::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 9px; border: 2px solid var(--panel-solid); }
+.notes .section { font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text-faint); font-weight: 600; padding: 13px 17px 8px; }
+
+.note { display: flex; gap: 11px; padding: 5px 17px; }
+.note .rail { position: relative; width: 7px; flex-shrink: 0; display: flex; justify-content: center; }
+.note .rail i { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: var(--text-faint); flex-shrink: 0; z-index: 1; }
+.note .rail::after { content: ""; position: absolute; top: 12px; bottom: -5px; width: 1px; background: var(--border); }
+.note:last-child .rail::after { display: none; }
+.note.mcp .rail i { background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+.note .body { flex: 1; min-width: 0; padding-bottom: 9px; }
+.note .body p { font-size: 12.5px; line-height: 1.55; color: var(--text-dim); }
+.note .body .who { font-size: 10.5px; color: var(--text-faint); margin-bottom: 3px; display: flex; gap: 7px; font-variant-numeric: tabular-nums; }
+.note .body .who b { font-weight: 560; }
+.note.mcp .body .who b { color: var(--accent); }
+
+.note-add { display: flex; gap: 7px; padding: 10px 17px 0; border-top: 1px solid var(--border); flex-shrink: 0; }
+.note-add input {
+  flex: 1; min-width: 0; padding: 7px 10px; font: inherit; font-size: 12.5px;
+  color: var(--text); background: var(--field-bg);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.note-add input:focus { outline: none; border-color: var(--accent); }
+.note-add button {
+  width: 34px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-hi); color: var(--text-dim); cursor: pointer; font-size: 15px;
+}
+.note-add button:hover { color: var(--text); border-color: var(--border-hi); }
+
+.detail-foot { padding: 11px 17px; border-top: 1px solid var(--border); display: flex; gap: 8px; flex-shrink: 0; }
+.detail-foot button { flex: 1; }
+
+/* ============================================================== 弹层 */
+.overlay {
+  position: fixed; inset: 0; z-index: 100;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, var(--bg) 68%, transparent);
+  backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px);
+  animation: fade 140ms ease;
+}
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+.modal {
+  width: 480px; max-width: calc(100vw - 48px);
+  background: var(--modal-bg);
+  border: 1px solid var(--border-hi); border-radius: 16px;
+  box-shadow: 0 32px 80px -24px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--surface);
+  padding: 21px 21px 17px;
+  animation: pop 160ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  max-height: calc(100vh - 60px); display: flex; flex-direction: column;
+}
+@keyframes pop { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
+
+.modal h3 { font-size: 15px; font-weight: 620; letter-spacing: -0.015em; margin-bottom: 17px; flex-shrink: 0; }
+
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 13px; }
+.field > span { font-size: 11px; color: var(--text-faint); letter-spacing: 0.02em; }
+.field input, .field select {
+  padding: 8px 11px; font: inherit; font-size: 13px; width: 100%;
+  color: var(--text); background: var(--field-bg);
+  border: 1px solid var(--border); border-radius: 9px; transition: border-color 150ms;
+}
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+.field .ro { padding: 8px 11px; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--accent); }
+
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.row.three { grid-template-columns: 1fr 0.85fr 0.85fr; }
+
+.modal-foot { display: flex; align-items: center; gap: 8px; margin-top: 19px; flex-shrink: 0; }
+.modal-foot .grow { flex: 1; }
+
+/* 分类选择:输入框 + 可点的色块 */
+.cat-input-wrap { position: relative; }
+.cat-picks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cat-pick {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 20px; font: inherit; font-size: 11.5px;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text-dim); cursor: pointer; transition: all 150ms;
+}
+.cat-pick:hover { border-color: var(--border-hi); color: var(--text); }
+.cat-pick.on { color: var(--text); border-color: var(--pc); background: color-mix(in srgb, var(--pc) 14%, transparent); }
+.cat-pick .swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--pc); flex-shrink: 0; }
+.cat-pick .new { color: var(--accent); }
+
+/* 确认耗时 */
+.modal.slim { width: 380px; }
+.modal.slim .big {
+  font-size: 26px; font-weight: 620; letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums; color: var(--accent); text-align: center; padding: 6px 0 2px;
+}
+.modal.slim .sub { text-align: center; font-size: 12px; color: var(--text-faint); margin-bottom: 17px; }
+.dur-edit { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* 分类管理 */
+.cat-list { overflow-y: auto; margin: -4px 0 4px; }
+.cat-row { display: flex; align-items: center; gap: 9px; padding: 7px 0; }
+.cat-row .dot {
+  width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
+  cursor: pointer; border: 1px solid var(--border-hi);
+  position: relative; overflow: hidden;
+}
+.cat-row .dot input { position: absolute; inset: -6px; opacity: 0; cursor: pointer; }
+.cat-row input.name {
+  flex: 1; min-width: 0; padding: 6px 10px; font: inherit; font-size: 12.5px;
+  color: var(--text); background: var(--field-bg);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.cat-row input.name:focus { outline: none; border-color: var(--accent); }
+.cat-row .cnt { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; min-width: 46px; text-align: right; }
+.cat-row .del {
+  width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
+  background: transparent; border: 1px solid transparent; color: var(--text-faint);
+  cursor: pointer; font-size: 14px; line-height: 1;
+}
+.cat-row .del:hover { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+
+/* ============================================================== 汇总 */
+.modal.wide { width: 980px; max-width: calc(100vw - 48px); }
+.sum-top { display: grid; grid-template-columns: 260px 1fr; gap: 26px; align-items: center; margin-bottom: 6px; }
+
+.donut-wrap { position: relative; display: grid; place-items: center; }
+.donut {
+  width: 178px; height: 178px; border-radius: 50%;
+  position: relative;
+  transition: background 300ms ease;
+}
+.donut::after {
+  content: ""; position: absolute; inset: 23%;
+  border-radius: 50%; background: var(--panel-solid);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.donut-center {
+  position: absolute; text-align: center; pointer-events: none;
+}
+.donut-center .v { font-size: 25px; font-weight: 640; letter-spacing: -0.035em; font-variant-numeric: tabular-nums; }
+.donut-center .v span { font-size: 13px; color: var(--text-faint); margin-left: 1px; }
+.donut-center .k { font-size: 11px; color: var(--text-faint); margin-top: 3px; }
+
+.legend { display: flex; flex-direction: column; gap: 3px; }
+.legend-row {
+  display: grid; grid-template-columns: 12px 1fr auto auto; gap: 10px; align-items: center;
+  padding: 7px 9px; border-radius: 9px; font-size: 12.5px;
+}
+.legend-row:hover { background: var(--surface); }
+.legend-row .swatch { width: 10px; height: 10px; border-radius: 3px; }
+.legend-row .n { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend-row .h { color: var(--text-dim); font-variant-numeric: tabular-nums; font-weight: 540; }
+.legend-row .p { color: var(--text-faint); font-variant-numeric: tabular-nums; min-width: 42px; text-align: right; }
+.legend-row.empty .n { color: var(--text-faint); }
+
+.sum-title {
+  font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--text-faint); font-weight: 600; margin: 20px 0 10px;
+}
+.cat-group { margin-bottom: 6px; }
+.cat-group .gh {
+  display: flex; align-items: center; gap: 9px; padding: 7px 9px;
+  border-radius: 9px; background: var(--surface); font-size: 12.5px;
+}
+.cat-group .gh .swatch { width: 10px; height: 10px; border-radius: 3px; }
+.cat-group .gh b { font-weight: 580; }
+.cat-group .gh .meta { margin-left: auto; color: var(--text-faint); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+.cat-group .items { padding: 2px 0 4px 22px; }
+.cat-group .it {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 12px;
+  padding: 4px 9px; font-size: 12px; color: var(--text-dim);
+}
+.cat-group .it .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-group .it .d { color: var(--text-faint); font-variant-numeric: tabular-nums; min-width: 40px; }
+.cat-group .it .h { font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
+
+.sum-scroll { overflow-y: auto; min-height: 0; margin: 0 -4px; padding: 0 4px; }
+.sum-scroll::-webkit-scrollbar { width: 9px; }
+.sum-scroll::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 9px; border: 2px solid var(--panel-solid); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">worklog <small>本地工作事项</small></div>
+
+    <div class="range-ctl">
+      <span class="lbl">时间轴</span>
+      <label class="switch"><input type="checkbox" id="autoRange" checked><span>自动</span></label>
+      <input type="number" id="hStart" min="0" max="23" value="9" disabled>
+      <span class="dash">–</span>
+      <input type="number" id="hEnd" min="1" max="24" value="18" disabled>
+    </div>
+
+    <span class="spacer"></span>
+
+    <button class="text-btn" id="btnSummary">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14">
+        <rect x="1.5" y="8" width="3" height="6.5" rx="1"/>
+        <rect x="6.5" y="4.5" width="3" height="10" rx="1"/>
+        <rect x="11.5" y="1.5" width="3" height="13" rx="1"/>
+      </svg>汇总</button>
+    <button class="text-btn" id="btnCats">分类</button>
+    <button class="icon-btn" id="btnTheme" title="切换深浅色"></button>
+
+    <div class="week-nav">
+      <button class="icon-btn" id="prev" title="上一周">‹</button>
+      <div class="range" id="rangeLabel"></div>
+      <button class="icon-btn" id="next" title="下一周">›</button>
+      <button class="text-btn" id="todayBtn">今天</button>
+    </div>
+
+    <button class="primary-btn" id="btnNew">+ 新建任务</button>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="hint">
+    <span class="dot"></span>
+    <span class="grow">Claude Code 还没连上 worklog —— 装一次就能让它帮你记录和出周报</span>
+    <code>claude mcp add worklog …</code>
+    <button class="primary-btn" style="padding:6px 13px">一键安装</button>
+  </div>
+
+  <div class="main">
+    <section class="panel">
+      <div class="gantt-head" id="ganttHead"></div>
+      <div class="gantt-body" id="ganttBody"></div>
+    </section>
+    <aside class="panel detail" id="detail"></aside>
+  </div>
+</div>
+
+<!-- 新建 / 编辑任务 -->
+<div class="overlay" id="editOverlay" hidden>
+  <div class="modal">
+    <h3 id="editTitle">新建任务</h3>
+
+    <label class="field"><span>标题</span>
+      <input id="fTitle" placeholder="做了什么" autocomplete="off">
+    </label>
+
+    <div class="field"><span>分类</span>
+      <div class="cat-input-wrap">
+        <input id="fCat" placeholder="选一个,或输入新名字(会自动建)" autocomplete="off">
+      </div>
+      <div class="cat-picks" id="catPicks"></div>
+    </div>
+
+    <div class="row three">
+      <label class="field"><span>日期</span><input type="date" id="fDate"></label>
+      <label class="field"><span>开始</span><input type="time" id="fStart"></label>
+      <label class="field"><span>结束</span><input type="time" id="fEnd"></label>
+    </div>
+
+    <div class="row">
+      <label class="field"><span>状态</span>
+        <select id="fStatus">
+          <option value="todo">待办</option>
+          <option value="doing">进行中</option>
+          <option value="done">已完成</option>
+        </select>
+      </label>
+      <label class="field"><span>时长</span><div class="ro" id="fDur">—</div></label>
+    </div>
+
+    <div class="modal-foot">
+      <button class="danger-btn" id="fDelete" hidden>删除</button>
+      <span class="grow"></span>
+      <button class="text-btn" id="fCancel">取消</button>
+      <button class="primary-btn" id="fSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 结束任务时确认耗时 -->
+<div class="overlay" id="durOverlay" hidden>
+  <div class="modal slim">
+    <h3>结束任务</h3>
+    <div class="big" id="durBig">1h15m</div>
+    <div class="sub" id="durSub">09:45 – 11:00 自动算出,可以改</div>
+    <div class="dur-edit">
+      <label class="field"><span>小时</span><input type="number" id="durH" min="0" max="23"></label>
+      <label class="field"><span>分钟</span><input type="number" id="durM" min="0" max="59" step="5"></label>
+    </div>
+    <div class="modal-foot">
+      <span class="grow"></span>
+      <button class="text-btn" id="durCancel">取消</button>
+      <button class="primary-btn" id="durOk">确认结束</button>
+    </div>
+  </div>
+</div>
+
+<!-- 分类维护 -->
+<div class="overlay" id="catOverlay" hidden>
+  <div class="modal" style="width:520px">
+    <h3>分类</h3>
+    <div class="cat-list" id="catList"></div>
+    <div class="modal-foot">
+      <button class="text-btn" id="catAdd">+ 新增分类</button>
+      <span class="grow"></span>
+      <button class="primary-btn" id="catDone">完成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 周汇总 -->
+<div class="overlay" id="sumOverlay" hidden>
+  <div class="modal wide">
+    <h3 id="sumTitle">本周汇总</h3>
+    <div class="sum-scroll" id="sumBody"></div>
+    <div class="modal-foot">
+      <span class="grow"></span>
+      <button class="primary-btn" id="sumClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const DOW = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const STATUS_LABEL = { todo: '待办', doing: '进行中', done: '已完成' };
+  const DAY = 864e5;
+
+  // 分类调色板。挑的是中等饱和度,深浅两套主题下都看得清。
+  const PALETTE = ['#7c6bff', '#2fb98a', '#f0913a', '#3b8fe8',
+                   '#e8558a', '#0ea5b7', '#c9a227', '#8b5cf6'];
+
+  // ---------------------------------------------------------------- 工具
+  const pad = (n) => String(n).padStart(2, '0');
+  const hm  = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+  const dur = (m) => (m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? pad(m % 60) + 'm' : ''}` : `${m}m`);
+  const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const parseHM = (s) => { const [h, m] = String(s).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+  const toHM = (min) => `${pad(Math.floor(min / 60))}:${pad(min % 60)}`;
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function mondayOf(d) {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+    return x;
+  }
+
+  // 原型把"今天"钉在 2026-10-15,让样例数据固定。真实产品取 new Date()。
+  const TODAY = new Date(2026, 9, 15);
+  const TODAY_ISO = iso(TODAY);
+  const W0 = mondayOf(TODAY);
+  const dayOfWeek = (i) => iso(new Date(W0.getTime() + i * DAY));
+  const dayBack = (n) => iso(new Date(W0.getTime() - n * DAY));
+  const dayFwd = (n) => iso(new Date(W0.getTime() + n * DAY));
+
+  // ---------------------------------------------------------------- 分类
+  let catSeq = 0;
+  const cid = () => 'c' + (++catSeq);
+
+  const categories = [
+    { id: cid(), name: 'axeops',  color: '#7c6bff' },
+    { id: cid(), name: 'worklog', color: '#2fb98a' },
+    { id: cid(), name: '运维',    color: '#f0913a' },
+    { id: cid(), name: '日常',    color: '#3b8fe8' },
+  ];
+
+  const catById = (id) => categories.find((c) => c.id === id) || null;
+  const catByName = (n) => categories.find((c) => c.name === n.trim()) || null;
+  const catColor = (id) => (catById(id) || {}).color || 'var(--todo)';
+  const catName = (id) => (catById(id) || {}).name || '未分类';
+
+  function nextColor() {
+    const used = new Set(categories.map((c) => c.color));
+    return PALETTE.find((p) => !used.has(p)) || PALETTE[categories.length % PALETTE.length];
+  }
+
+  // 输入一个名字:已有就复用,没有就按调色板建一个新的
+  function ensureCat(name) {
+    const n = String(name || '').trim();
+    if (!n) return null;
+    const hit = catByName(n);
+    if (hit) return hit;
+    const c = { id: cid(), name: n, color: nextColor() };
+    categories.push(c);
+    return c;
+  }
+
+  // ---------------------------------------------------------------- 数据
+  let seq = 0;
+  const nid = () => 't' + (++seq);
+  const C = (n) => (catByName(n) || {}).id || null;
+  const T = (o) => Object.assign({ id: nid(), notes: [] }, o);
+
+  let tasks = [
+    // ---- 本周
+    T({ date: dayOfWeek(0), s: 555, e: 570, cat: C('日常'),   title: '站会', status: 'done' }),
+    T({ date: dayOfWeek(0), s: 585, e: 735, cat: C('worklog'), title: '修面板多屏落位', status: 'done', notes: [
+      { who: '我',     t: '09:45', mcp: false, text: '面板跑到另一块屏上了,先复现。' },
+      { who: 'Claude', t: '10:12', mcp: true,  text: '定位到 Wails 的 SetPos 把坐标当成相对当前显示器工作区的偏移,不是屏幕绝对坐标。' },
+      { who: 'Claude', t: '10:48', mcp: true,  text: '改用 SetWindowPos 绝对定位,三块屏实测全部吻合。' },
+    ] }),
+    T({ date: dayOfWeek(0), s: 750, e: 795, cat: C('axeops'), title: '代码评审', status: 'done' }),
+    T({ date: dayOfWeek(0), s: 810, e: 900, cat: C('axeops'), title: '告警 Agent 设计', status: 'done' }),
+    T({ date: dayOfWeek(0), s: 930, e: 970, cat: C('运维'),   title: '处理工单', status: 'done' }),
+    T({ date: dayOfWeek(0), s: 990, e: 1050, cat: C('运维'),  title: '环境排查', status: 'done' }),
+
+    T({ date: dayOfWeek(1), s: 555, e: 570, cat: C('日常'),   title: '站会', status: 'done' }),
+    T({ date: dayOfWeek(1), s: 585, e: 690, cat: C('axeops'), title: '告警聚合调研', status: 'done' }),
+    T({ date: dayOfWeek(1), s: 620, e: 650, cat: C('运维'),   title: '处理工单', status: 'done' }),
+    T({ date: dayOfWeek(1), s: 700, e: 760, cat: C('日常'),   title: '需求评审会', status: 'done' }),
+    T({ date: dayOfWeek(1), s: 800, e: 890, cat: C('axeops'), title: '修内存泄漏', status: 'done' }),
+    T({ date: dayOfWeek(1), s: 930, e: 990, cat: C('日常'),   title: '写周报', status: 'done' }),
+
+    T({ date: dayOfWeek(2), s: 555, e: 570, cat: C('日常'),   title: '站会', status: 'done' }),
+    T({ date: dayOfWeek(2), s: 585, e: 705, cat: C('worklog'), title: 'worklog 原型', status: 'done', notes: [
+      { who: '我',     t: '09:50', mcp: false, text: '要周视图,不要热力图。' },
+      { who: 'Claude', t: '11:20', mcp: true,  text: '出了单文件原型,时间轴甘特 + 详情栏。' },
+    ] }),
+    T({ date: dayOfWeek(2), s: 720, e: 780, cat: C('axeops'), title: '联调网关超时', status: 'done' }),
+    T({ date: dayOfWeek(2), s: 810, e: 915, cat: C('日常'),   title: '周报初稿', status: 'done' }),
+    T({ date: dayOfWeek(2), s: 930, e: 980, cat: C('axeops'), title: '代码评审', status: 'done' }),
+
+    T({ date: dayOfWeek(3), s: 555, e: 570, cat: C('日常'),   title: '站会', status: 'done' }),
+    T({ date: dayOfWeek(3), s: 585, e: 660, cat: C('worklog'), title: 'MCP 工具链验证', status: 'doing', notes: [
+      { who: 'Claude', t: '09:52', mcp: true, text: '起了一个只有 ping 的 HTTP MCP server。' },
+      { who: 'Claude', t: '10:31', mcp: true, text: 'claude mcp add 配上去之后能连上,工具可调用。' },
+    ] }),
+    T({ date: dayOfWeek(3), s: 620, e: 700, cat: C('axeops'), title: '告警降噪规则', status: 'doing' }),
+    T({ date: dayOfWeek(3), s: 780, e: 840, cat: C('日常'),   title: '面试', status: 'todo' }),
+    T({ date: dayOfWeek(3), s: 860, e: 930, cat: C('日常'),   title: '整理周报数据', status: 'todo' }),
+    T({ date: dayOfWeek(3), s: 960, e: 1050, cat: C('axeops'), title: '告警 Agent 编码', status: 'todo' }),
+
+    T({ date: dayOfWeek(4), s: 555, e: 570, cat: C('日常'),   title: '站会', status: 'todo' }),
+    T({ date: dayOfWeek(4), s: 600, e: 690, cat: C('axeops'), title: '告警 Agent 编码', status: 'todo' }),
+    T({ date: dayOfWeek(4), s: 720, e: 810, cat: C('日常'),   title: '复盘会', status: 'todo' }),
+    T({ date: dayOfWeek(4), s: 840, e: 900, cat: C('日常'),   title: '周会', status: 'todo' }),
+
+    // ---- 上周 / 下周:让周切换看得出效果
+    T({ date: dayBack(5), s: 585, e: 720, cat: C('axeops'), title: '告警规则梳理', status: 'done' }),
+    T({ date: dayBack(4), s: 600, e: 690, cat: C('axeops'), title: '网关限流改造', status: 'done' }),
+    T({ date: dayBack(3), s: 780, e: 870, cat: C('日常'),   title: '季度复盘材料', status: 'done' }),
+    T({ date: dayFwd(7), s: 585, e: 705, cat: C('axeops'),  title: '告警 Agent 联调', status: 'todo' }),
+    T({ date: dayFwd(8), s: 600, e: 720, cat: C('worklog'), title: 'worklog 设计文档', status: 'todo' }),
+    T({ date: dayFwd(9), s: 780, e: 840, cat: C('日常'),    title: '月度汇报', status: 'todo' }),
+  ];
+
+  // ---------------------------------------------------------------- 视图状态
+  let weekOffset = 0;
+  let autoRange = true;
+  let fixedStart = 9, fixedEnd = 18;
+  let selected = tasks.find((t) => t.status === 'doing') || null;
+  let editingId = null;
+
+  const weekStart = () => new Date(W0.getTime() + weekOffset * 7 * DAY);
+  const weekEnd = () => new Date(weekStart().getTime() + 7 * DAY);
+  const dayAt = (i) => new Date(weekStart().getTime() + i * DAY);
+  const isToday = (i) => iso(dayAt(i)) === TODAY_ISO;
+  const isWeekend = (i) => i >= 5;
+  const tasksOn = (dateISO) => tasks.filter((t) => t.date === dateISO);
+  const inWeek = (t) => { const d = new Date(t.date + 'T00:00:00'); return d >= weekStart() && d < weekEnd(); };
+
+  let DAY_START = 9, DAY_END = 18, SPAN = 9;
+
+  function refreshRange() {
+    if (autoRange) {
+      const week = tasks.filter(inWeek);
+      let lo = 24 * 60, hi = 0;
+      week.forEach((t) => { lo = Math.min(lo, t.s); hi = Math.max(hi, t.e); });
+
+      const todayInWeek = iso(TODAY) >= iso(weekStart()) && iso(TODAY) < iso(weekEnd());
+      if (todayInWeek) {
+        const now = new Date();
+        hi = Math.max(hi, now.getHours() * 60 + now.getMinutes());
+      }
+      if (lo >= hi) { lo = 9 * 60; hi = 18 * 60; }
+      DAY_START = Math.max(0, Math.floor(lo / 60));
+      DAY_END = Math.min(24, Math.ceil(hi / 60));
+    } else {
+      DAY_START = fixedStart;
+      DAY_END = fixedEnd;
+    }
+    if (DAY_END <= DAY_START) DAY_END = DAY_START + 1;
+    SPAN = DAY_END - DAY_START;
+
+    document.getElementById('hStart').value = DAY_START;
+    document.getElementById('hEnd').value = DAY_END;
+  }
+
+  const pct = (min) => ((min / 60 - DAY_START) / SPAN) * 100;
+
+  // ---------------------------------------------------------------- 渲染
+  function renderTop() {
+    const a = weekStart(), b = dayAt(6);
+    document.getElementById('rangeLabel').innerHTML =
+      `${a.getFullYear()} 年 ${a.getMonth() + 1} 月 <em>·</em> ${a.getDate()} – ${b.getDate()} 日`;
+  }
+
+  function renderHead() {
+    document.getElementById('ganttHead').innerHTML =
+      '<div class="gap"></div>' + DOW.map((dow, i) => {
+        const mins = tasksOn(iso(dayAt(i))).reduce((a, t) => a + (t.e - t.s), 0);
+        return `<div class="day-head${isToday(i) ? ' today' : ''}${isWeekend(i) ? ' weekend' : ''}" data-day="${i}">
+          <div class="dow">${dow}</div>
+          <div class="dom">${dayAt(i).getDate()}</div>
+          <div class="sum">${mins ? dur(mins) : '—'}</div>
+        </div>`;
+      }).join('');
+
+    document.querySelectorAll('.day-head').forEach((el) => {
+      el.onclick = () => openEdit(null, Number(el.dataset.day));
+    });
+  }
+
+  function renderStats() {
+    const week = tasks.filter(inWeek);
+    const total = week.reduce((a, t) => a + (t.e - t.s), 0);
+    const n = (s) => week.filter((t) => t.status === s).length;
+
+    document.getElementById('stats').innerHTML = `
+      <div class="stat accent"><div class="num">${(total / 60).toFixed(1)}<span>h</span></div><div class="lbl">本周总时长</div></div>
+      <div class="stat done"><div class="num">${n('done')}<span>项</span></div><div class="lbl">已完成</div></div>
+      <div class="stat working"><div class="num">${n('doing')}<span>项</span></div><div class="lbl">进行中</div></div>
+      <div class="stat"><div class="num">${n('todo')}<span>项</span></div><div class="lbl">待办</div></div>`;
+  }
+
+  // 重叠的任务并排到不同的 lane,各自均分列宽 —— 不能一个占满整宽、
+  // 另一个只占一半,那样两块会直接盖在一起。
+  function assignLanes(list) {
+    const laneEnds = [];
+    [...list].sort((a, b) => a.s - b.s || b.e - a.e).forEach((t) => {
+      let li = laneEnds.findIndex((end) => end <= t.s);
+      if (li === -1) { laneEnds.push(t.e); li = laneEnds.length - 1; }
+      else laneEnds[li] = t.e;
+      t.lane = li;
+    });
+    return Math.max(laneEnds.length, 1);
+  }
+
+  function renderGantt() {
+    const body = document.getElementById('ganttBody');
+    body.innerHTML = '';
+    body.style.setProperty('--hours', SPAN);
+
+    const hours = document.createElement('div');
+    hours.className = 'hours';
+    hours.style.setProperty('--hours', SPAN);
+    for (let h = DAY_START; h <= DAY_END; h++) {
+      const el = document.createElement('div');
+      el.className = 'h' + (h === DAY_END ? ' last' : '');
+      el.style.top = pct(h * 60) + '%';
+      el.textContent = pad(h) + ':00';
+      hours.appendChild(el);
+    }
+    body.appendChild(hours);
+
+    for (let i = 0; i < 7; i++) {
+      const col = document.createElement('div');
+      col.className = 'col' + (isWeekend(i) ? ' weekend' : '') + (isToday(i) ? ' today' : '');
+      col.style.setProperty('--hours', SPAN);
+
+      col.onclick = (e) => {
+        if (e.target !== col) return;
+        const r = col.getBoundingClientRect();
+        const mins = DAY_START * 60 + ((e.clientY - r.top) / r.height) * SPAN * 60;
+        openEdit(null, i, Math.round(mins / 15) * 15);
+      };
+
+      const list = tasksOn(iso(dayAt(i)));
+      const lanes = assignLanes(list);
+      const w = 100 / lanes;
+
+      list.forEach((t) => {
+        const el = document.createElement('div');
+        el.className = 'blk ' + t.status;
+        if (t === selected) el.classList.add('sel');
+        el.style.setProperty('--cat', catColor(t.cat));
+
+        const h = pct(t.e) - pct(t.s);
+        if (h < 6) el.classList.add('short');
+
+        el.style.left  = `calc(${t.lane * w}% + 3px)`;
+        el.style.right = `calc(${(lanes - t.lane - 1) * w}% + 3px)`;
+        el.style.top    = pct(t.s) + '%';
+        el.style.height = `calc(${h}% - 3px)`;
+        el.title = `${t.title}\n${catName(t.cat)} · ${hm(t.s)}–${hm(t.e)} · ${dur(t.e - t.s)} · ${STATUS_LABEL[t.status]}\n双击编辑`;
+
+        el.innerHTML = `<div class="t">${esc(t.title)}</div>
+                        <div class="m">${hm(t.s)}–${hm(t.e)} · ${dur(t.e - t.s)}</div>`;
+        el.onclick = (e) => { e.stopPropagation(); selected = t; renderGantt(); renderDetail(); };
+        el.ondblclick = (e) => { e.stopPropagation(); openEdit(t); };
+        col.appendChild(el);
+      });
+
+      if (isToday(i)) {
+        const now = new Date();
+        const nm = now.getHours() * 60 + now.getMinutes();
+        if (nm >= DAY_START * 60 && nm <= DAY_END * 60) {
+          const line = document.createElement('div');
+          line.className = 'nowline';
+          line.style.top = pct(nm) + '%';
+          col.appendChild(line);
+        }
+      }
+      body.appendChild(col);
+    }
+  }
+
+  function renderDetail() {
+    const el = document.getElementById('detail');
+    if (!selected || !tasks.includes(selected)) {
+      el.innerHTML = `<div class="detail-head">
+        <div class="eyebrow">任务详情</div>
+        <h2 style="color:var(--text-faint);font-weight:500;font-size:13.5px;line-height:1.6">
+          点一个任务看详情<br>双击任务或在空白处单击可以新建 / 编辑
+        </h2></div>`;
+      return;
+    }
+
+    const t = selected;
+    const notes = t.notes || [];
+    const d = new Date(t.date + 'T00:00:00');
+    const dow = DOW[(d.getDay() + 6) % 7];
+    const cat = catById(t.cat);
+
+    el.innerHTML = `
+      <div class="detail-head">
+        <div class="eyebrow">任务详情</div>
+        <h2>${esc(t.title)}</h2>
+        <div class="chips">
+          <span class="chip ${t.status}">${STATUS_LABEL[t.status]}</span>
+          ${cat ? `<span class="chip"><i class="swatch" style="background:${cat.color}"></i>${esc(cat.name)}</span>` : ''}
+          <span class="chip">${dow} ${d.getMonth() + 1}/${d.getDate()}</span>
+        </div>
+      </div>
+
+      <div class="detail-stats">
+        <div><div class="k">时长</div><div class="v">${dur(t.e - t.s)}</div></div>
+        <div><div class="k">时段</div><div class="v">${hm(t.s)}–${hm(t.e)}</div></div>
+      </div>
+
+      <div class="notes">
+        <div class="section">备注 · ${notes.length}</div>
+        ${notes.length
+          ? notes.map((n) => `
+              <div class="note${n.mcp ? ' mcp' : ''}">
+                <div class="rail"><i></i></div>
+                <div class="body">
+                  <div class="who"><b>${esc(n.who)}</b><span>${n.t}</span></div>
+                  <p>${esc(n.text)}</p>
+                </div>
+              </div>`).join('')
+          : `<div class="note"><div class="rail"><i></i></div>
+               <div class="body"><p style="color:var(--text-faint)">还没有备注</p></div></div>`}
+      </div>
+
+      <div class="note-add">
+        <input id="noteText" placeholder="加一条备注…" autocomplete="off">
+        <button id="noteAdd" title="添加">+</button>
+      </div>
+
+      <div class="detail-foot">
+        <button class="text-btn" id="btnEdit">编辑</button>
+        <button class="primary-btn" id="btnToggle">
+          ${t.status === 'doing' ? '结束并确认耗时' : t.status === 'done' ? '重新开始' : '开始计时'}
+        </button>
+      </div>`;
+
+    const now = new Date();
+    const stamp = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+    document.getElementById('noteAdd').onclick = () => {
+      const inp = document.getElementById('noteText');
+      const v = inp.value.trim();
+      if (!v) return;
+      (t.notes = t.notes || []).push({ who: '我', t: stamp, mcp: false, text: v });
+      renderDetail();
+    };
+    document.getElementById('noteText').onkeydown = (e) => {
+      if (e.key === 'Enter') document.getElementById('noteAdd').click();
+    };
+    document.getElementById('btnEdit').onclick = () => openEdit(t);
+    document.getElementById('btnToggle').onclick = () => {
+      if (t.status === 'doing') { confirmDuration(t); return; }
+      t.status = 'doing';
+      renderAll();
+    };
+  }
+
+  function renderAll() {
+    refreshRange();
+    renderTop(); renderHead(); renderStats(); renderGantt(); renderDetail();
+  }
+
+  // ---------------------------------------------------------------- 新建 / 编辑
+  const editOverlay = document.getElementById('editOverlay');
+  const f = {
+    title:  document.getElementById('fTitle'),
+    cat:    document.getElementById('fCat'),
+    date:   document.getElementById('fDate'),
+    start:  document.getElementById('fStart'),
+    end:    document.getElementById('fEnd'),
+    status: document.getElementById('fStatus'),
+  };
+
+  function renderCatPicks() {
+    const cur = f.cat.value.trim();
+    document.getElementById('catPicks').innerHTML = categories.map((c) =>
+      `<button type="button" class="cat-pick${c.name === cur ? ' on' : ''}"
+               data-name="${esc(c.name)}" style="--pc:${c.color}">
+         <i class="swatch"></i>${esc(c.name)}
+       </button>`).join('')
+      + (cur && !catByName(cur) ? `<span class="cat-pick" style="cursor:default"><span class="new">新建「${esc(cur)}」</span></span>` : '');
+
+    document.querySelectorAll('.cat-pick[data-name]').forEach((el) => {
+      el.onclick = () => { f.cat.value = el.dataset.name; renderCatPicks(); };
+    });
+  }
+
+  function openEdit(task, dayIdx, startMin) {
+    editingId = task ? task.id : null;
+    document.getElementById('editTitle').textContent = task ? '编辑任务' : '新建任务';
+    document.getElementById('fDelete').hidden = !task;
+
+    if (task) {
+      f.title.value = task.title;
+      f.cat.value = catName(task.cat) === '未分类' ? '' : catName(task.cat);
+      f.date.value = task.date;
+      f.start.value = toHM(task.s);
+      f.end.value = toHM(task.e);
+      f.status.value = task.status;
+    } else {
+      const idx = dayIdx != null ? dayIdx : 0;
+      const s = startMin != null ? startMin : 9 * 60;
+      f.title.value = '';
+      f.cat.value = '';
+      f.date.value = iso(dayAt(idx));
+      f.start.value = toHM(s);
+      f.end.value = toHM(Math.min(s + 60, 23 * 60 + 59));
+      f.status.value = 'todo';
+    }
+    updateDur();
+    renderCatPicks();
+
+    editOverlay.hidden = false;
+    setTimeout(() => f.title.focus(), 30);
+  }
+
+  function updateDur() {
+    const s = parseHM(f.start.value || '00:00');
+    const e = parseHM(f.end.value || '00:00');
+    const d = e - s;
+    document.getElementById('fDur').textContent = d > 0 ? dur(d) : '—';
+  }
+
+  f.start.addEventListener('input', updateDur);
+  f.end.addEventListener('input', updateDur);
+  f.cat.addEventListener('input', renderCatPicks);
+
+  function closeEdit() { editOverlay.hidden = true; editingId = null; }
+
+  document.getElementById('fCancel').onclick = closeEdit;
+  editOverlay.onclick = (e) => { if (e.target === editOverlay) closeEdit(); };
+
+  document.getElementById('fDelete').onclick = () => {
+    const id = editingId;
+    tasks = tasks.filter((t) => t.id !== id);
+    if (selected && selected.id === id) selected = null;
+    closeEdit(); renderAll();
+  };
+
+  document.getElementById('fSave').onclick = () => {
+    const title = f.title.value.trim();
+    if (!title) { f.title.focus(); return; }
+
+    const s = parseHM(f.start.value || '09:00');
+    let e = parseHM(f.end.value || '10:00');
+    if (e <= s) e = Math.min(s + 60, 23 * 60 + 59);
+
+    // 输入了不存在的分类名 → 就地建一个
+    const cat = ensureCat(f.cat.value);
+
+    const patch = { title, cat: cat ? cat.id : null, date: f.date.value, s, e, status: f.status.value };
+
+    if (editingId) {
+      const t = tasks.find((x) => x.id === editingId);
+      Object.assign(t, patch);
+      selected = t;
+    } else {
+      const t = T(Object.assign({ notes: [] }, patch));
+      tasks.push(t);
+      selected = t;
+    }
+    closeEdit(); renderAll();
+  };
+
+  // ---------------------------------------------------------------- 确认耗时
+  const durOverlay = document.getElementById('durOverlay');
+  let durTask = null;
+
+  function confirmDuration(t) {
+    durTask = t;
+    const auto = t.e - t.s;
+    document.getElementById('durBig').textContent = dur(auto);
+    document.getElementById('durSub').textContent = `${hm(t.s)} – ${hm(t.e)} 自动算出,可以改`;
+    document.getElementById('durH').value = Math.floor(auto / 60);
+    document.getElementById('durM').value = auto % 60;
+    durOverlay.hidden = false;
+  }
+
+  const durValue = () => {
+    const h = Number(document.getElementById('durH').value) || 0;
+    const m = Number(document.getElementById('durM').value) || 0;
+    return Math.max(h * 60 + m, 0);
+  };
+
+  ['durH', 'durM'].forEach((id) => {
+    document.getElementById(id).addEventListener('input', () => {
+      const v = durValue();
+      document.getElementById('durBig').textContent = v ? dur(v) : '—';
+    });
+  });
+
+  const closeDur = () => { durOverlay.hidden = true; durTask = null; };
+  document.getElementById('durCancel').onclick = closeDur;
+  durOverlay.onclick = (e) => { if (e.target === durOverlay) closeDur(); };
+
+  document.getElementById('durOk').onclick = () => {
+    const v = durValue();
+    if (durTask && v > 0) {
+      // 按确认的耗时回写结束时间,并留一条痕迹 —— 用户改过的时长要能看出来
+      durTask.e = Math.min(durTask.s + v, 23 * 60 + 59);
+      durTask.status = 'done';
+      const now = new Date();
+      (durTask.notes = durTask.notes || []).push({
+        who: '我', t: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+        mcp: false, text: `确认耗时 ${dur(v)}`,
+      });
+    }
+    closeDur(); renderAll();
+  };
+
+  // ---------------------------------------------------------------- 分类维护
+  const catOverlay = document.getElementById('catOverlay');
+
+  function renderCatList() {
+    const used = {};
+    tasks.forEach((t) => { if (t.cat) used[t.cat] = (used[t.cat] || 0) + 1; });
+
+    document.getElementById('catList').innerHTML = categories.map((c) => `
+      <div class="cat-row" data-id="${c.id}">
+        <label class="dot" style="background:${c.color}" title="改颜色">
+          <input type="color" value="${c.color}" data-color="${c.id}">
+        </label>
+        <input class="name" value="${esc(c.name)}" data-name="${c.id}">
+        <span class="cnt">${used[c.id] || 0} 项</span>
+        <button class="del" data-del="${c.id}" title="删除">×</button>
+      </div>`).join('') || '<p style="color:var(--text-faint);font-size:12.5px;padding:8px 0">还没有分类</p>';
+
+    document.querySelectorAll('[data-color]').forEach((el) => {
+      el.oninput = () => {
+        const c = catById(el.dataset.color);
+        c.color = el.value;
+        renderCatList(); renderAll();
+      };
+    });
+
+    document.querySelectorAll('input.name[data-name]').forEach((el) => {
+      el.onchange = () => {
+        const c = catById(el.dataset.name);
+        const n = el.value.trim();
+        if (!n) { el.value = c.name; return; }
+        const dup = categories.find((x) => x !== c && x.name === n);
+        if (dup) { el.value = c.name; return; }
+        c.name = n;
+        renderCatList(); renderAll();
+      };
+    });
+
+    document.querySelectorAll('[data-del]').forEach((el) => {
+      el.onclick = () => {
+        const id = el.dataset.del;
+        // 删分类不删任务,任务回到"未分类" —— 数据不该因为整理分类而丢
+        tasks.forEach((t) => { if (t.cat === id) t.cat = null; });
+        categories.splice(categories.findIndex((c) => c.id === id), 1);
+        renderCatList(); renderAll();
+      };
+    });
+  }
+
+  document.getElementById('btnCats').onclick = () => { renderCatList(); catOverlay.hidden = false; };
+  document.getElementById('catDone').onclick = () => { catOverlay.hidden = true; };
+  catOverlay.onclick = (e) => { if (e.target === catOverlay) catOverlay.hidden = true; };
+  document.getElementById('catAdd').onclick = () => {
+    categories.push({ id: cid(), name: '新分类', color: nextColor() });
+    renderCatList(); renderAll();
+  };
+
+  // ---------------------------------------------------------------- 周汇总
+  const sumOverlay = document.getElementById('sumOverlay');
+
+  function renderSummary() {
+    const a = weekStart(), b = dayAt(6);
+    document.getElementById('sumTitle').textContent =
+      `周汇总 · ${a.getFullYear()} 年 ${a.getMonth() + 1} 月 ${a.getDate()} – ${b.getDate()} 日`;
+
+    const week = tasks.filter(inWeek);
+    const total = week.reduce((x, t) => x + (t.e - t.s), 0);
+
+    // 按分类聚合。没有分类的归到"未分类",保证占比之和是 100%。
+    const byCat = new Map();
+    week.forEach((t) => {
+      const key = t.cat || '__none__';
+      if (!byCat.has(key)) byCat.set(key, { mins: 0, items: [] });
+      const g = byCat.get(key);
+      g.mins += t.e - t.s;
+      g.items.push(t);
+    });
+
+    const rows = [...byCat.entries()]
+      .map(([id, g]) => ({ id, name: catName(id), color: catColor(id), mins: g.mins, items: g.items }))
+      .sort((x, y) => y.mins - x.mins);
+
+    const body = document.getElementById('sumBody');
+
+    if (!total) {
+      body.innerHTML = '<p style="color:var(--text-faint);font-size:13px;padding:24px 0;text-align:center">这一周还没有记录</p>';
+      return;
+    }
+
+    // 环形图:conic-gradient 直接按占比切分
+    let acc = 0;
+    const stops = rows.map((r) => {
+      const from = acc, to = acc + (r.mins / total) * 100;
+      acc = to;
+      return `${r.color} ${from.toFixed(3)}% ${to.toFixed(3)}%`;
+    }).join(', ');
+
+    body.innerHTML = `
+      <div class="sum-top">
+        <div class="donut-wrap">
+          <div class="donut" style="background:conic-gradient(${stops})"></div>
+          <div class="donut-center">
+            <div class="v">${(total / 60).toFixed(1)}<span>h</span></div>
+            <div class="k">本周总时长</div>
+          </div>
+        </div>
+        <div class="legend">
+          ${rows.map((r) => `
+            <div class="legend-row">
+              <i class="swatch" style="background:${r.color}"></i>
+              <span class="n">${esc(r.name)}</span>
+              <span class="h">${dur(r.mins)}</span>
+              <span class="p">${((r.mins / total) * 100).toFixed(0)}%</span>
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <div class="sum-title">按分类明细 · ${week.length} 项</div>
+      ${rows.map((r) => `
+        <div class="cat-group">
+          <div class="gh">
+            <i class="swatch" style="background:${r.color}"></i>
+            <b>${esc(r.name)}</b>
+            <span class="meta">${dur(r.mins)} · ${((r.mins / total) * 100).toFixed(0)}% · ${r.items.length} 项</span>
+          </div>
+          <div class="items">
+            ${r.items.sort((x, y) => x.date.localeCompare(y.date) || x.s - y.s).map((t) => {
+              const d = new Date(t.date + 'T00:00:00');
+              return `<div class="it">
+                <span class="t">${esc(t.title)}</span>
+                <span class="d">${DOW[(d.getDay() + 6) % 7]} ${d.getMonth() + 1}/${d.getDate()}</span>
+                <span class="h">${dur(t.e - t.s)}</span>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>`).join('')}`;
+  }
+
+  document.getElementById('btnSummary').onclick = () => { renderSummary(); sumOverlay.hidden = false; };
+  document.getElementById('sumClose').onclick = () => { sumOverlay.hidden = true; };
+  sumOverlay.onclick = (e) => { if (e.target === sumOverlay) sumOverlay.hidden = true; };
+
+  // ---------------------------------------------------------------- 主题
+  const THEME_KEY = 'worklog.theme';
+  const SUN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3.2"/><path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1M12.9 12.9l-1.1-1.1M4.2 4.2L3.1 3.1"/></svg>';
+  const MOON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13.5 9.6A5.8 5.8 0 0 1 6.4 2.5a5.8 5.8 0 1 0 7.1 7.1z"/></svg>';
+
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    document.getElementById('btnTheme').innerHTML = t === 'dark' ? SUN : MOON;
+    document.getElementById('btnTheme').title = t === 'dark' ? '切到浅色' : '切到深色';
+    try { localStorage.setItem(THEME_KEY, t); } catch { /* 无痕模式等,忽略 */ }
+  }
+
+  let saved = 'dark';
+  try { saved = localStorage.getItem(THEME_KEY) || 'dark'; } catch { /* ignore */ }
+  applyTheme(saved);
+
+  document.getElementById('btnTheme').onclick = () => {
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+  };
+
+  // ---------------------------------------------------------------- 顶部交互
+  document.getElementById('prev').onclick = () => { weekOffset--; renderAll(); };
+  document.getElementById('next').onclick = () => { weekOffset++; renderAll(); };
+  document.getElementById('todayBtn').onclick = () => { weekOffset = 0; renderAll(); };
+  document.getElementById('btnNew').onclick = () => {
+    const idx = Array.from({ length: 7 }, (_, i) => i).find(isToday);
+    openEdit(null, idx != null ? idx : 0);
+  };
+
+  const autoBox = document.getElementById('autoRange');
+  const hS = document.getElementById('hStart');
+  const hE = document.getElementById('hEnd');
+
+  autoBox.onchange = () => {
+    autoRange = autoBox.checked;
+    hS.disabled = hE.disabled = autoRange;
+    renderAll();
+  };
+
+  const applyFixed = () => {
+    fixedStart = Math.max(0, Math.min(23, Number(hS.value) || 0));
+    fixedEnd = Math.max(fixedStart + 1, Math.min(24, Number(hE.value) || 1));
+    if (!autoRange) renderAll();
+  };
+  hS.onchange = applyFixed;
+  hE.onchange = applyFixed;
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    for (const [ov, close] of [
+      [durOverlay, closeDur],
+      [sumOverlay, () => { sumOverlay.hidden = true; }],
+      [catOverlay, () => { catOverlay.hidden = true; }],
+      [editOverlay, closeEdit],
+    ]) {
+      if (!ov.hidden) { close(); return; }
+    }
+  });
+
+  renderAll();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "worklog",
+  "outputfilename": "worklog",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "worklog"
+  },
+  "info": {
+    "productName": "worklog",
+    "productVersion": "0.1.0",
+    "comments": "本地工作事项与计时工具"
+  }
+}

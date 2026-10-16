@@ -1,0 +1,20 @@
+# 构建产物。注意只忽略 build/bin,不是整个 build/ ——
+# build/windows 下的图标、manifest、info.json 是 wails build 要用的源文件,
+# 少了它们新克隆出来的仓库构建不起来。
+# (paste-win 那边是整个 build/ 忽略的,靠本地文件还在;这里不跟着那么做。)
+build/bin/
+*.exe
+
+# 运行时数据。默认落在 %LOCALAPPDATA%\worklog\,本来就在仓库之外;
+# 这里只兜底那些可能被显式指到仓库里的产物。
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
