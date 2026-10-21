@@ -26,9 +26,24 @@
   // ---------------------------------------------------------------- 工具
   const pad = (n) => String(n).padStart(2, '0');
   const dur = (m) => (m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? pad(m % 60) + 'm' : ''}` : `${m}m`);
+  // 秒级时长。只给"正在跑"的读数用 —— 静止的值精确到秒是噪音,
+  // 走着的值精确到秒才让人相信它真的在走
+  const durSec = (min) => {
+    const t = Math.max(Math.floor(min * 60), 0);
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    if (h) return `${h}h${pad(m)}m${pad(s)}s`;
+    return m ? `${m}m${pad(s)}s` : `${s}s`;
+  };
   const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const parseHM = (s) => { const [h, m] = String(s).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
   const toHM = (min) => `${pad(Math.floor(min / 60))}:${pad(min % 60)}`;
+
+  // 当前时刻的分钟数,取整到 5 分钟。
+  //
+  // 取整是为了让时间栏里出现 14:30 而不是 14:32 —— 粒度够细,不会明显偏离"现在"。
+  // 上限夹到 23:55:23:58 向上取整会变成 24:00,那不是合法的 time 值。
+  const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+  const snap5 = (m) => Math.min(Math.round(m / 5) * 5, 23 * 60 + 55);
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -41,6 +56,8 @@
 
   // ---------------------------------------------------------------- 状态
   const state = {
+    // 'timeline' | 'req'。两个视图的数据互不相干,切换是把主区整个换掉
+    view: 'timeline',
     weekOffset: 0,
     autoRange: true,
     fixedStart: 9,
@@ -55,6 +72,18 @@
     span: 9,
     // 状态视角。空串 = 全部。只看不影响数据,只影响画什么
     statusFilter: '',
+
+    // ---- 需求视图
+    components: [],
+    requirements: [],
+    reqStats: null,
+    stages: [],       // [{value, label}],顺序由后端给
+    reqEditingId: null,
+    reqCompFilter: '', // 组件筛选,空 = 全部
+    // 汇总弹窗里的季度筛选,空 = 全部。只影响汇总,不影响看板
+    reqQuarter: '',
+    // 分类和组件共用一套 CRUD 弹窗,这个决定它现在在维护哪个
+    crudKind: 'cat',
   };
 
   // 当前视角下可见的事项。时间轴、甘特图、每日合计都走它;
@@ -74,6 +103,42 @@
   const catName = (id) => (catById(id) || {}).name || '未分类';
   const selected = () => state.tasks.find((t) => t.id === state.selectedId) || null;
 
+  const compById = (id) => state.components.find((c) => c.id === id) || null;
+  const compColor = (id) => (compById(id) || {}).color || 'var(--todo)';
+  const compName = (id) => (compById(id) || {}).name || '未指定组件';
+
+  // ---------------------------------------------------------------- 走表
+  //
+  // 后端给的 durationMin 是取数那一刻的值,30 秒的轮询间隔里它会停住 ——
+  // 而"做了多久"正是盯着看的时候最不该冻住的数字。所以界面上自己一秒算一次。
+
+  // 还在跑的那一段从开始到现在过了多少秒。没有在跑的段返回 null。
+  function liveSeconds(t) {
+    const open = (t.spans || []).find((s) => s.open);
+    if (!open) return null;
+    const started = new Date(`${open.date}T${open.start}:00`).getTime();
+    if (Number.isNaN(started)) return null;
+    return Math.max((Date.now() - started) / 1000, 0);
+  }
+
+  // 事项此刻的总时长(分钟,带小数)。已暂停 / 已完成的原样返回后端算好的值。
+  //
+  // 算法:拿后端的合计减掉那一段的旧读数,再加上此刻的实时值 ——
+  // 这样"逐段取整再求和"的口径不变,只有正在跑的那一段是活的。
+  function liveMinutes(t) {
+    const secs = liveSeconds(t);
+    if (secs == null) return t.durationMin;
+    const open = t.spans.find((s) => s.open);
+    return (t.durationMin - open.minutes) + secs / 60;
+  }
+
+  // 有输入框的弹窗开着时不该重画:重画会把手打到一半的字冲掉
+  const editing = () => !el('editOverlay').hidden || !el('reqOverlay').hidden;
+
+  // 时间轴那一侧要隐藏的控件。需求视图里它们全都说不通。
+  // 汇总不在里面 —— 两个视图都能汇总,只是汇总的东西不同
+  const TIMELINE_ONLY = ['rangeCtl', 'statusFilter', 'btnCats', 'weekNav'];
+
   const pct = (min) => ((min / 60 - state.dayStart) / state.span) * 100;
 
   // ---------------------------------------------------------------- 取数
@@ -81,12 +146,20 @@
     const from = iso(weekStart());
     const to = iso(new Date(weekStart().getTime() + 6 * DAY));
     try {
-      const [tasks, cats] = await Promise.all([
+      const [tasks, cats, board, comps, stages] = await Promise.all([
         bridge.ListTasks(from, to),
         bridge.ListCategories(),
+        bridge.RequirementBoard(),
+        bridge.ListComponents(),
+        bridge.RequirementStages(),
       ]);
       state.tasks = tasks || [];
       state.categories = cats || [];
+      // 需求这一份总是拉:数据量小,按视图懒加载只会多一处"切过去是空的"的时机
+      state.requirements = board?.requirements || [];
+      state.reqStats = board?.stats || null;
+      state.components = comps || [];
+      state.stages = stages || [];
     } catch (e) {
       reportError('加载失败')(e);
       state.tasks = [];
@@ -121,10 +194,35 @@
 
   // ---------------------------------------------------------------- 渲染
   function renderAll() {
-    renderTop(); renderHead(); renderStats(); renderGantt(); renderDetail();
+    const req = state.view === 'req';
+
+    // 顶栏按视图换装:时间轴的控件在需求视图里全都说不通,反之亦然
+    renderViewSwitch();
+    TIMELINE_ONLY.forEach((id) => { el(id).hidden = req; });
+    el('btnComps').hidden = !req;
+    el('btnNew').textContent = req ? '+ 新建需求' : '+ 新建任务';
+
+    el('main').classList.toggle('req-mode', req);
+    el('ganttPanel').hidden = req;
+    el('detail').hidden = req;
+    el('reqPanel').hidden = !req;
+
+    renderTop();
+    renderStats();
+    if (req) { renderReqs(); return; }
+    renderHead(); renderGantt(); renderDetail();
+  }
+
+  // 高亮必须在这里跟着 state.view 走,不能只在点击处理里改 ——
+  // 否则任何别的入口改了 view,按钮就会停在上一个视图上,和主区对不上。
+  function renderViewSwitch() {
+    el('viewSwitch').querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.view === state.view);
+    });
   }
 
   function renderTop() {
+    if (state.view === 'req') return; // 需求不是按周看的,rangeLabel 这会儿是隐藏的
     const a = weekStart(), b = dayAt(6);
     el('rangeLabel').innerHTML =
       `${a.getFullYear()} 年 ${a.getMonth() + 1} 月 <em>·</em> ${a.getDate()} – ${b.getDate()} 日`;
@@ -143,7 +241,10 @@
   // 后端保证 EndMin = StartMin + 时长,所以看 EndMin 有没有超过 1440 就知道。
   function segsOf(t, dateISO) {
     if (!t.spans || !t.spans.length) {
-      if (t.date !== dateISO || t.endMin <= t.startMin) return [];
+      if (t.date !== dateISO) return [];
+      // 未定结束(跨度零长):不画时长,但**得画出来** ——
+      // 不画的话新建的任务会直接从周视图里消失,像是没建上。
+      if (t.endMin <= t.startMin) return [{ start: t.startMin, end: t.startMin, plan: true, openEnd: true }];
       return [{ start: t.startMin, end: Math.min(t.endMin, 24 * 60), plan: true }];
     }
     const out = [];
@@ -189,6 +290,8 @@
   }
 
   function renderStats() {
+    if (state.view === 'req') return renderReqStats();
+
     const total = state.tasks.reduce((a, t) => a + t.durationMin, 0);
     const n = (s) => state.tasks.filter((t) => t.status === s).length;
     el('stats').innerHTML = `
@@ -316,18 +419,38 @@
           node.className = 'blk ' + t.status;
           if (sg.plan) node.classList.add('plan');
           if (sg.open) node.classList.add('live');
+          if (sg.openEnd) node.classList.add('open-end');
 
           const h = pct(sg.end) - pct(sg.start);
-          if (h < 6) node.classList.add('short');
+          // 未定结束的块不加 .short —— 那个类会把第二行藏起来,
+          // 而「未定结束」正要显示在那儿。高度交给 CSS 的 min-height。
+          // 太矮就只留标题一行。阈值按**像素**判而不是按百分比 ——
+          // 百分比和实际高度脱钩:矮窗口下 6% 只有二十来像素,两行内容挤在
+          // 里面比只有标题还难看。甘特图的高度渲染时就知道,直接用。
+          const bodyH = body.clientHeight || 700;
+          const px = (h / 100) * bodyH;
+          if (px < 38 && !sg.openEnd) node.classList.add('short');
 
           node.style.left = `calc(${sg._lane * w}% + 3px)`;
           node.style.right = `calc(${(lanes - sg._lane - 1) * w}% + 3px)`;
           node.style.top = pct(sg.start) + '%';
-          node.style.height = `calc(${h}% - 3px)`;
+          if (!sg.openEnd) node.style.height = `calc(${h}% - 3px)`;
 
-          const label = sg.plan ? '计划' : dur(sg.end - sg.start);
-          const range = `${toHM(sg.start)}–${toHM(sg.end)}`;
-          node.title = `${t.title}\n${catName(t.categoryId)} · ${range} · ${label} · ${statusLabel(t)}\n双击编辑`;
+          const plain = sg.openEnd ? '未定结束' : sg.plan ? '计划' : dur(sg.end - sg.start);
+          const range = sg.openEnd ? `${toHM(sg.start)}–` : `${toHM(sg.start)}–${toHM(sg.end)}`;
+          node.title = `${t.title}\n${catName(t.categoryId)} · ${range} · ${plain} · ${statusLabel(t)}\n双击编辑`;
+
+          // 还在跑的那一块:时长文字一秒一跳,块本身也跟着长高。
+          // 只标记,值交给 tickLive 算 —— 重画整个甘特图会把悬停和选中态弄丢
+          const label = sg.open
+            ? `<span data-live="${t.id}" data-fmt="min">${plain}</span>`
+            : plain;
+          if (sg.open) {
+            node.dataset.grow = t.id;
+            node.dataset.startMin = sg.start;
+            node.dataset.day = iso(dayAt(i));
+          }
+
           node.innerHTML = `<div class="t">${esc(t.title)}</div>
                             <div class="m">${range} · ${label}</div>`;
 
@@ -367,10 +490,45 @@
     return STATUS_LABEL[t.status];
   }
 
+  // 备注框跟着内容长高。多行备注是常态,固定两行会让人写到第三行就开始
+  // 在框里搓滚轮 —— 那正是"太小了"的来源
+  const growNote = (ta) => {
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
+  };
+
+  // 详情栏是可以整个重画的(30 秒轮询、MCP 写入、删时段都会触发)。
+  // 重画会把正在写的备注冲掉 —— 打到一半没了,比框小得多难受。
+  // 所以画之前把草稿记下来,画完连光标位置一起补回去。
+  function captureNoteDraft(host) {
+    const ta = host.querySelector('#noteText');
+    if (!ta) return null;
+    const focused = document.activeElement === ta;
+    if (!ta.value && !focused) return null; // 没东西可保
+    // 记下是哪个任务的框 —— 切到别的事項时草稿要丢掉,不能串到别人身上
+    return { taskId: host.dataset.taskId || '', value: ta.value,
+             start: ta.selectionStart, end: ta.selectionEnd, focused };
+  }
+
+  function restoreNoteDraft(host, d, taskId) {
+    if (!d || d.taskId !== taskId) return;
+    const ta = host.querySelector('#noteText');
+    if (!ta) return;
+    ta.value = d.value;
+    growNote(ta);
+    if (d.focused) {
+      ta.focus();
+      ta.setSelectionRange(d.start, d.end);
+    }
+  }
+
   function renderDetail() {
     const host = el('detail');
+    const draft = captureNoteDraft(host);
     const t = selected();
     if (!t) {
+      host.dataset.taskId = '';
       host.innerHTML = `<div class="detail-head">
         <div class="eyebrow">任务详情</div>
         <h2 style="color:var(--text-faint);font-weight:500;font-size:13.5px;line-height:1.6">
@@ -398,7 +556,8 @@
       </div>
 
       <div class="detail-stats">
-        <div><div class="k">实际投入${t.confirmed ? '' : '(未确认)'}</div><div class="v">${t.durationMin ? dur(t.durationMin) : '—'}</div></div>
+        <div><div class="k">实际投入${t.confirmed ? '' : '(未确认)'}</div>
+          <div class="v${t.running ? ' live' : ''}" data-live="${t.id}" data-fmt="sec">${t.durationMin ? dur(t.durationMin) : '—'}</div></div>
         <div><div class="k">${spans.length ? '时段 · ' + spans.length + ' 段' : '计划时段'}</div><div class="v">${spans.length ? dur(t.durationMin) : t.start + '–' + t.end}</div></div>
       </div>
 
@@ -411,7 +570,9 @@
                 <div class="body">
                   <div class="who">
                     <b>${s.start}–${s.open ? '进行中' : s.end}</b>
-                    <span>${s.open ? dur(s.minutes) + ' 且还在走' : dur(s.minutes)}</span>
+                    <span>${s.open
+                      ? `<b data-live="${t.id}" data-fmt="min">${dur(s.minutes)}</b> 且还在走`
+                      : dur(s.minutes)}</span>
                   </div>
                 </div>
                 <button class="seg-del" data-span="${s.id}" title="删除这一段">×</button>
@@ -430,19 +591,22 @@
         <div class="section">备注 · ${notes.length}</div>
         ${notes.length
           ? notes.map((n) => `
-              <div class="note${n.who === 'claude' ? ' mcp' : ''}">
+              <div class="note${n.who === 'claude' ? ' mcp' : ''}" data-note="${n.id}">
                 <div class="rail"><i></i></div>
                 <div class="body">
-                  <div class="who"><b>${n.who === 'claude' ? 'Claude' : '我'}</b><span>${n.at}</span></div>
+                  <div class="who"><b>${n.who === 'claude' ? 'Claude' : '我'}</b><span>${n.at}</span>${
+                    n.edited ? '<span class="edited">已编辑</span>' : ''}</div>
                   <p>${esc(n.text)}</p>
                 </div>
+                <button class="note-act" data-note-edit="${n.id}" title="编辑">编辑</button>
+                <button class="note-act del" data-note-del="${n.id}" title="删除">×</button>
               </div>`).join('')
           : `<div class="note"><div class="rail"><i></i></div>
                <div class="body"><p style="color:var(--text-faint)">还没有备注</p></div></div>`}
       </div>
 
       <div class="note-add">
-        <input id="noteText" placeholder="加一条备注…" autocomplete="off">
+        <textarea id="noteText" rows="2" placeholder="加一条备注…(Enter 提交,Shift+Enter 换行)"></textarea>
         <button id="noteAdd" title="添加">+</button>
       </div>
 
@@ -453,6 +617,9 @@
           ${t.status === 'doing' ? '结束并确认耗时' : t.status === 'done' ? '重新开始' : '开始计时'}
         </button>
       </div>`;
+
+    restoreNoteDraft(host, draft, t.id);
+    host.dataset.taskId = t.id;
 
     host.querySelectorAll('.seg-del').forEach((btn) => {
       btn.onclick = async (e) => {
@@ -478,10 +645,43 @@
       if (!v) return;
       try {
         const full = await bridge.AddNote(t.id, v);
+        el('noteText').value = ''; // 提交成功才清空,失败要留着(见下面 reportError)
         replaceTask(full); renderDetail(); renderGantt();
       } catch (e) { reportError('添加备注失败')(e); }
     };
-    el('noteText').onkeydown = (e) => { if (e.key === 'Enter') el('noteAdd').click(); };
+
+    // Enter 提交、Shift+Enter 换行 —— 聊天框的习惯。换行留给真正需要多行的人,
+    // 否则一行备注要按 Shift 才能提交,反了。
+    el('noteText').onkeydown = (e) => {
+      if (e.key !== 'Enter' || e.shiftKey) return;
+      e.preventDefault();
+      el('noteAdd').click();
+    };
+    el('noteText').oninput = () => growNote(el('noteText'));
+    el('noteText').onblur = () => {
+      // 有焦点时憋住的刷新在离开时补上,不然详情栏会一直停在旧数据上
+      if (reloadDeferred) { reloadDeferred = false; scheduleReload(); }
+    };
+
+    // 备注的编辑 / 删除。两个按钮平时是透明的,悬停才显形 ——
+    // 备注主要是拿来读的,不该一排按钮抢视线。
+    host.querySelectorAll('[data-note-edit]').forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); startNoteEdit(t, btn.dataset.noteEdit); };
+    });
+    host.querySelectorAll('.note[data-note] .body').forEach((body) => {
+      body.onclick = () => startNoteEdit(t, body.closest('.note').dataset.note);
+    });
+    host.querySelectorAll('[data-note-del]').forEach((btn) => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          await bridge.DeleteNote(btn.dataset.noteDel);
+          replaceTask(await bridge.GetTask(t.id));
+          renderDetail(); renderGantt();
+        } catch (err) { reportError('删除备注失败')(err); }
+      };
+    });
+
     el('btnEdit').onclick = () => openEdit(t);
     el('btnToggle').onclick = async () => {
       if (t.status === 'doing') { confirmDuration(t); return; }
@@ -501,6 +701,48 @@
         } catch (e) { reportError('操作失败')(e); }
       };
     }
+  }
+
+  // 把一条备注就地变成可编辑的。不跳出去、不弹窗 —— 时间线原地改。
+  //
+  // 保存走 Ctrl+Enter(或点保存),**失焦不保存**:备注常常是多行的,
+  // 写着写着点到别处太常见了,自动保存要么丢内容要么误存半截。
+  function startNoteEdit(t, noteId) {
+    const n = (t.notes || []).find((x) => x.id === noteId);
+    const node = el('detail').querySelector(`.note[data-note="${noteId}"]`);
+    if (!n || !node) return;
+    const body = node.querySelector('.body');
+    if (body.querySelector('textarea')) return; // 已经在这个编辑态里了,别再套一层
+
+    body.innerHTML = `
+      <div class="who"><b>${n.who === 'claude' ? 'Claude' : '我'}</b><span>${n.at}</span>${
+        n.edited ? '<span class="edited">已编辑</span>' : ''}</div>
+      <textarea class="note-edit" rows="2">${esc(n.text)}</textarea>
+      <div class="note-edit-foot">
+        <button class="text-btn" data-cancel>取消</button>
+        <button class="primary-btn" data-save>保存</button>
+      </div>`;
+
+    const ta = body.querySelector('textarea');
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length); // 光标落到末尾,接着改最顺
+
+    const cancel = () => renderDetail(); // 重画一遍就是还原,不用手工回滚 DOM
+    const save = async () => {
+      const v = ta.value.trim();
+      if (!v) { ta.focus(); return; } // 改成空不算删除,见 store.UpdateNote
+      try {
+        replaceTask(await bridge.UpdateNote(noteId, v));
+        renderDetail(); renderGantt();
+      } catch (e) { reportError('改备注失败')(e); }
+    };
+
+    body.querySelector('[data-cancel]').onclick = cancel;
+    body.querySelector('[data-save]').onclick = save;
+    ta.onkeydown = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); cancel(); }
+      else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+    };
   }
 
   function replaceTask(full) {
@@ -540,16 +782,19 @@
       f.cat.value = catName(task.categoryId) === '未分类' ? '' : catName(task.categoryId);
       f.date.value = task.date;
       f.start.value = task.start;
-      f.end.value = task.end;
+      f.end.value = task.openEnd ? '' : task.end; // 未定结束就留空,别填个假的
       f.status.value = task.status;
     } else {
       const idx = dayIdx != null ? dayIdx : 0;
-      const s = startMin != null ? startMin : 9 * 60;
+      // 没指定时刻就用"现在"取整到 5 分钟 —— 默认 09:00 的话,下午打开弹窗
+      // 得先改开始、再拉结束才存得上。在空白格子上点是另一回事:
+      // 那个手势本身就表达了"我要这个时刻",照用点击位置。
+      const s = startMin != null ? startMin : snap5(nowMin());
       f.title.value = '';
       f.cat.value = '';
       f.date.value = iso(dayAt(idx));
       f.start.value = toHM(s);
-      f.end.value = toHM(Math.min(s + 60, 23 * 60 + 59));
+      f.end.value = ''; // 结束时间默认留空 = 未定结束
       f.status.value = 'todo';
     }
     updateDur();
@@ -567,7 +812,13 @@
   f.end.addEventListener('input', updateDur);
   f.cat.addEventListener('input', renderCatPicks);
 
-  const closeEdit = () => { editOverlay.hidden = true; state.editingId = null; };
+  const closeEdit = () => {
+    editOverlay.hidden = true;
+    state.editingId = null;
+    // 弹窗开着时憋住的刷新(定时轮询 / MCP 事件)在这里补上,不然关掉后
+    // 要等下一个 30 秒周期才更新
+    if (reloadDeferred) { reloadDeferred = false; scheduleReload(); }
+  };
 
   el('fCancel').onclick = closeEdit;
   editOverlay.onclick = (e) => { if (e.target === editOverlay) closeEdit(); };
@@ -580,9 +831,20 @@
     } catch (e) { reportError('删除失败')(e); }
   };
 
-  el('fSave').onclick = async () => {
+  // 保存。startNow 为真表示点的是「开始计时」—— 存下来并立刻开始走表。
+  //
+  // 这时日期和开始时刻**强制成此刻**:按钮的意思就是"现在开始做这件事",
+  // 照表单里那个值开会把之前改过的时间也算进去,时长从一开头就是错的。
+  async function saveTask(startNow) {
     const title = f.title.value.trim();
     if (!title) { f.title.focus(); return; }
+
+    if (startNow) {
+      const now = new Date();
+      f.date.value = iso(now);
+      f.start.value = toHM(snap5(now.getHours() * 60 + now.getMinutes()));
+      f.end.value = ''; // 还没结束,结束时间当然也还没有
+    }
 
     const catNameVal = f.cat.value.trim();
     try {
@@ -597,15 +859,26 @@
         id: state.editingId || '',
         title,
         categoryId,
-        status: f.status.value,
+        status: startNow ? 'doing' : f.status.value,
         date: f.date.value,
         start: f.start.value,
         end: f.end.value,
       });
+
+      // 新建时状态给了 doing,CreateTask 已经顺带开了一段;但编辑一条暂停中的
+      // 事项时不会 —— SetTaskStatus 会把那一段补上,已经在跑则幂等返回。
+      if (startNow) await bridge.SetTaskStatus(saved.id, 'doing');
+
       state.selectedId = saved.id;
       closeEdit(); await reload();
     } catch (e) { reportError('保存失败')(e); }
-  };
+  }
+
+  el('fSave').onclick = () => saveTask(false);
+  // 注意 id 是 fStartNow 不是 fStart —— 后者是上面那个"开始时间"输入框。
+  // 两个用同一个 id 的话 getElementById 只会拿到先出现的那个输入框,
+  // 按钮永远接不到点击(踩过)
+  el('fStartNow').onclick = () => saveTask(true);
 
   // ---------------------------------------------------------------- 确认耗时
   const durOverlay = el('durOverlay');
@@ -624,7 +897,10 @@
       : '这条事项还没有时段,按计划跨度记一段';
     el('durH').value = Math.floor(mins / 60);
     el('durM').value = mins % 60;
+    el('durNote').value = ''; // 每次打开都是空的,别把上一条的内容带过来
     durOverlay.hidden = false;
+    // 焦点给备注而不是时长:时长多数时候不用改,那句话才是不写就忘的
+    setTimeout(() => el('durNote').focus(), 30);
   }
 
   const durValue = () => Math.max(
@@ -643,64 +919,340 @@
 
   el('durOk').onclick = async () => {
     const v = durValue();
+    const note = el('durNote').value.trim();
     try {
-      const full = await bridge.FinishTask(state.durTaskId, v);
+      const full = await bridge.FinishTask(state.durTaskId, v, note);
       replaceTask(full);
     } catch (e) { reportError('结束任务失败')(e); }
     closeDur(); await reload();
   };
 
+  // ---------------------------------------------------------------- 需求看板
+  //
+  // 时间轴记的是"今天做了什么",看板记的是"这个季度在推什么"。两者共用一套
+  // 刷新和事件,但画法完全不同,所以在 renderAll 里就分岔了。
+  const reqOverlay = el('reqOverlay');
+
+  // 阶段短名:"需求提交" → "提交"。进度条上五个节点横排,带"需求"两个字会挤成一团。
+  // 前缀由后端那套标签统一给出,这里只是去掉它,不另立一份名单。
+  const shortStage = (label) => String(label || '').replace(/^需求/, '');
+
+  function renderReqStats() {
+    const st = state.reqStats || { total: 0, online: 0, thisQuarter: 0 };
+    el('stats').innerHTML = `
+      <div class="stat accent"><div class="num">${st.total}<span>条</span></div><div class="lbl">需求总数</div></div>
+      <div class="stat done"><div class="num">${st.online}<span>条</span></div><div class="lbl">已上线</div></div>
+      <div class="stat working"><div class="num">${st.total - st.online}<span>条</span></div><div class="lbl">推进中</div></div>
+      <div class="stat"><div class="num">${st.thisQuarter}<span>条</span></div><div class="lbl">本季度上线</div></div>`;
+  }
+
+  // 按组件分组。顺序、数量和完成度都直接取统计里的 —— 自己再折一遍,
+  // 就有和头部数字对不上的可能。
+  function reqGroups() {
+    const st = state.reqStats || { components: [] };
+    const byComp = new Map();
+    state.requirements.forEach((r) => {
+      const k = r.componentId || '';
+      if (!byComp.has(k)) byComp.set(k, []);
+      byComp.get(k).push(r);
+    });
+
+    return st.components
+      .filter((c) => (state.reqCompFilter ? c.id === state.reqCompFilter : c.total > 0))
+      .map((c) => ({ ...c, items: byComp.get(c.id) || [] }));
+  }
+
+  function reqCard(r) {
+    const steps = state.stages.map((s, i) => {
+      const cls = i === r.stageIndex ? ' on' : (i < r.stageIndex ? ' done' : '');
+      return `<i class="step${cls}" data-stage="${s.value}" title="标为${s.label}">${shortStage(s.label)}</i>`;
+    }).join('');
+
+    // 链接去掉协议头再显示 —— 一屏卡片里满眼 https:// 是噪音,主机名才是有用的部分
+    const link = r.link
+      ? `<a class="rc-link" data-url="${esc(r.link)}" title="${esc(r.link)}">${esc(r.link.replace(/^https?:\/\//, ''))}</a>`
+      : '';
+
+    return `<div class="req-card${r.stage === 'online' ? ' online' : ''}" data-id="${r.id}"
+                 style="--cc:${compColor(r.componentId)}">
+      <div class="rc-top">
+        <span class="rc-title">${esc(r.title)}</span>
+        <span class="rc-badge">${esc(r.stageLabel)}</span>
+      </div>
+      <div class="steps">${steps}</div>
+      <div class="rc-meta">
+        ${link}
+        <span class="rc-date">${r.start.slice(5)} 起</span>
+        ${r.online ? `<span class="rc-online">上线 ${r.online.slice(5)} · ${esc(r.quarter)}</span>` : ''}
+      </div>
+    </div>`;
+  }
+
+  function renderReqs() {
+    renderReqHead();
+
+    const groups = reqGroups();
+    const body = el('reqBody');
+
+    if (!groups.length) {
+      body.innerHTML = `<div class="req-empty">${
+        state.requirements.length ? '这个组件下还没有需求' : '还没有需求。点右上角「+ 新建需求」记一条'}</div>`;
+      return;
+    }
+
+    body.innerHTML = groups.map((g) => `
+      <div class="req-group">
+        <div class="rg-head">
+          <i class="dot" style="background:${g.color || 'var(--todo)'}"></i>
+          <span class="rg-name">${esc(g.name)}</span>
+          <span class="rg-count">${g.online}/${g.total}</span>
+          <span class="rg-bar"><i style="width:${g.percent}%"></i></span>
+          <span class="rg-pct">${g.percent.toFixed(0)}%</span>
+        </div>
+        <div class="rg-cards">${g.items.map(reqCard).join('')}</div>
+      </div>`).join('');
+
+    bindReqCards();
+  }
+
+  function bindReqCards() {
+    document.querySelectorAll('.req-card').forEach((node) => {
+      const id = node.dataset.id;
+
+      // 点进度条上的节点 = 直接跳到那个阶段。这是"标记进度"的主路径,一次点击,
+      // 不用开弹窗。卡片本身点开弹窗,所以这里必须拦住冒泡。
+      node.querySelectorAll('.step').forEach((step) => {
+        step.onclick = async (e) => {
+          e.stopPropagation();
+          await setReqStage(id, step.dataset.stage);
+        };
+      });
+
+      node.querySelectorAll('[data-url]').forEach((a) => {
+        a.onclick = (e) => {
+          e.stopPropagation();
+          if (Go && typeof Go.OpenURL === 'function') Go.OpenURL(a.dataset.url).catch(reportError('打开链接失败'));
+        };
+      });
+
+      node.onclick = () => openReqEdit(state.requirements.find((r) => r.id === id) || null);
+    });
+  }
+
+  function renderReqHead() {
+    const st = state.reqStats || { total: 0, online: 0, percent: 0, quarters: [] };
+
+    const chips = st.quarters.map((q) =>
+      `<span class="q-chip">${esc(q.label)}<b>${q.online}</b></span>`).join('');
+
+    const opts = state.components.map((c) =>
+      `<option value="${c.id}"${c.id === state.reqCompFilter ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
+
+    el('reqHead').innerHTML = `
+      <div class="rh-total">
+        <div class="rh-num">${st.online}<span>/${st.total}</span></div>
+        <div class="rh-lbl">已上线 · ${st.percent.toFixed(0)}%</div>
+        <div class="rh-bar"><i style="width:${st.percent}%"></i></div>
+      </div>
+      <div class="rh-quarters">
+        <span class="rh-cap">按季度</span>
+        ${chips || '<span class="rh-none">还没有上线的需求</span>'}
+      </div>
+      <select id="reqCompFilter" title="只看某个组件">
+        <option value="">全部组件</option>${opts}
+      </select>`;
+
+    el('reqCompFilter').onchange = (e) => {
+      state.reqCompFilter = e.target.value;
+      renderReqs();
+    };
+  }
+
+  // 标记阶段。切到「上线」且还没日期时,后端会记成现在 —— 这里不重复那套规则。
+  async function setReqStage(id, stage) {
+    try {
+      await bridge.SetRequirementStage(id, stage, '');
+      await reload();
+    } catch (e) {
+      reportError('改阶段失败')(e);
+    }
+  }
+
+  // ---------------------------------------------------------------- 新建 / 编辑需求
+  const r = {
+    title: el('rTitle'), comp: el('rComp'), link: el('rLink'),
+    detail: el('rDetail'), stage: el('rStage'), online: el('rOnline'),
+  };
+
+  function renderCompPicks() {
+    const cur = r.comp.value.trim();
+    el('rCompPicks').innerHTML = state.components.map((c) =>
+      `<button type="button" class="cat-pick${c.name === cur ? ' on' : ''}"
+               data-name="${esc(c.name)}" style="--pc:${c.color}">
+         <i class="swatch"></i>${esc(c.name)}
+       </button>`).join('')
+      + (cur && !state.components.some((c) => c.name === cur)
+        ? `<span class="cat-pick" style="cursor:default"><span class="new">新建「${esc(cur)}」</span></span>` : '');
+
+    document.querySelectorAll('#rCompPicks .cat-pick[data-name]').forEach((node) => {
+      node.onclick = () => { r.comp.value = node.dataset.name; renderCompPicks(); };
+    });
+  }
+
+  // 阶段下拉的选项从后端拿。顺序和中文名只在 model.Stages 里定义一次,
+  // 不在 HTML 里再抄一份 —— 加一个阶段时两边都得改,迟早对不上
+  function renderStageOptions() {
+    el('rStage').innerHTML = state.stages
+      .map((s) => `<option value="${s.value}">${esc(s.label)}</option>`).join('');
+  }
+
+  function openReqEdit(req) {
+    state.reqEditingId = req ? req.id : null;
+    el('reqTitle').textContent = req ? '编辑需求' : '新建需求';
+    el('rDelete').hidden = !req;
+
+    r.title.value = req ? req.title : '';
+    r.comp.value = req && req.componentId ? compName(req.componentId) : '';
+    r.link.value = req ? req.link : '';
+    r.detail.value = req ? req.detail : '';
+    // 先填选项再赋值,否则 value 落不到任何一项上,下拉是空的
+    renderStageOptions();
+    r.stage.value = req ? req.stage : 'submit';
+    r.online.value = req ? req.online : '';
+
+    renderCompPicks();
+    reqOverlay.hidden = false;
+    setTimeout(() => r.title.focus(), 30);
+  }
+
+  async function saveReq() {
+    const title = r.title.value.trim();
+    if (!title) { r.title.focus(); return; }
+
+    try {
+      await bridge.SaveRequirement({
+        id: state.reqEditingId || '',
+        title,
+        component: r.comp.value.trim(),
+        link: r.link.value.trim(),
+        detail: r.detail.value.trim(),
+        stage: r.stage.value,
+        onlineDate: r.online.value,
+      });
+      reqOverlay.hidden = true;
+      await reload();
+    } catch (e) {
+      reportError('保存需求失败')(e);
+    }
+  }
+
+  r.comp.oninput = renderCompPicks;
+  el('rSave').onclick = saveReq;
+  el('rCancel').onclick = () => { reqOverlay.hidden = true; };
+  reqOverlay.onclick = (e) => { if (e.target === reqOverlay) reqOverlay.hidden = true; };
+  el('rDelete').onclick = async () => {
+    if (!state.reqEditingId) return;
+    try {
+      await bridge.DeleteRequirement(state.reqEditingId);
+      reqOverlay.hidden = true;
+      await reload();
+    } catch (e) {
+      reportError('删除需求失败')(e);
+    }
+  };
+  // 阶段下拉和上线时间是一件事的两面,但后端会自己收敛,这里不做联动校验 ——
+  // 在前端拦一道只会让人以为"填了日期却没生效"
+  el('rStage').onchange = () => { if (r.stage.value === 'online' && !r.online.value) r.online.focus(); };
+
   // ---------------------------------------------------------------- 分类维护
   const catOverlay = el('catOverlay');
 
-  function renderCatList() {
-    el('catList').innerHTML = state.categories.map((c) => `
+  // 分类和组件是同一套 CRUD 界面:一行 = 色块 + 名字 + 用量 + 删除。
+  // 只有标题、数据源和调哪个接口不同,所以共用一个渲染函数,不复制第二份。
+  const CRUD = {
+    cat: {
+      title: '分类', addText: '+ 新增分类', noun: '分类', unit: '项',
+      list: () => state.categories,
+      byId: catById,
+      save: (id, name, color) => bridge.SaveCategory(id, name, color),
+      del: (id) => bridge.DeleteCategory(id),
+      create: () => bridge.SaveCategory('', '新分类', ''),
+    },
+    comp: {
+      title: '组件', addText: '+ 新增组件', noun: '组件', unit: '条',
+      list: () => state.components,
+      byId: compById,
+      save: (id, name, color) => bridge.SaveComponent(id, name, color),
+      del: (id) => bridge.DeleteComponent(id),
+      create: () => bridge.SaveComponent('', '新组件', ''),
+    },
+  };
+
+  function openCrud(kind) {
+    state.crudKind = kind;
+    el('crudTitle').textContent = CRUD[kind].title;
+    el('catAdd').textContent = CRUD[kind].addText;
+    renderCrudList();
+    catOverlay.hidden = false;
+  }
+
+  function renderCrudList() {
+    const k = CRUD[state.crudKind];
+
+    el('catList').innerHTML = k.list().map((c) => `
       <div class="cat-row">
         <label class="dot" style="background:${c.color}" title="改颜色">
           <input type="color" value="${c.color}" data-color="${c.id}">
         </label>
         <input class="name" value="${esc(c.name)}" data-name="${c.id}">
-        <span class="cnt">${c.count || 0} 项</span>
+        <span class="cnt">${c.count || 0} ${k.unit}</span>
         <button class="del" data-del="${c.id}" title="删除">×</button>
       </div>`).join('')
-      || '<p style="color:var(--text-faint);font-size:12.5px;padding:8px 0">还没有分类</p>';
+      || `<p style="color:var(--text-faint);font-size:12.5px;padding:8px 0">还没有${k.noun}</p>`;
 
-    document.querySelectorAll('[data-color]').forEach((node) => {
+    document.querySelectorAll('#catList [data-color]').forEach((node) => {
       node.oninput = async () => {
-        const c = catById(node.dataset.color);
-        try { await bridge.SaveCategory(c.id, c.name, node.value); await reload(); renderCatList(); }
+        const c = k.byId(node.dataset.color);
+        if (!c) return;
+        try { await k.save(c.id, c.name, node.value); await reload(); renderCrudList(); }
         catch (e) { reportError('改颜色失败')(e); }
       };
     });
-    document.querySelectorAll('input.name[data-name]').forEach((node) => {
+    document.querySelectorAll('#catList input.name[data-name]').forEach((node) => {
       node.onchange = async () => {
-        const c = catById(node.dataset.name);
+        const c = k.byId(node.dataset.name);
+        if (!c) return;
         const n = node.value.trim();
         if (!n || n === c.name) { node.value = c.name; return; }
-        try { await bridge.SaveCategory(c.id, n, c.color); await reload(); renderCatList(); }
+        try { await k.save(c.id, n, c.color); await reload(); renderCrudList(); }
         catch (e) { reportError('改名失败')(e); node.value = c.name; }
       };
     });
-    document.querySelectorAll('[data-del]').forEach((node) => {
+    document.querySelectorAll('#catList [data-del]').forEach((node) => {
       node.onclick = async () => {
-        try { await bridge.DeleteCategory(node.dataset.del); await reload(); renderCatList(); }
-        catch (e) { reportError('删除分类失败')(e); }
+        try { await k.del(node.dataset.del); await reload(); renderCrudList(); }
+        catch (e) { reportError(`删除${k.noun}失败`)(e); }
       };
     });
   }
 
-  el('btnCats').onclick = () => { renderCatList(); catOverlay.hidden = false; };
+  el('btnCats').onclick = () => openCrud('cat');
+  el('btnComps').onclick = () => openCrud('comp');
   el('catDone').onclick = () => { catOverlay.hidden = true; };
   catOverlay.onclick = (e) => { if (e.target === catOverlay) catOverlay.hidden = true; };
   el('catAdd').onclick = async () => {
-    try { await bridge.SaveCategory('', '新分类', ''); await reload(); renderCatList(); }
-    catch (e) { reportError('新增分类失败')(e); }
+    try { await CRUD[state.crudKind].create(); await reload(); renderCrudList(); }
+    catch (e) { reportError('新增失败')(e); }
   };
 
   // ---------------------------------------------------------------- 周汇总
   const sumOverlay = el('sumOverlay');
 
   async function renderSummary() {
+    // 汇总按钮两个视图都有,但汇总的东西完全不是一回事:时间轴按分类算时长,
+    // 需求按组件算条数。所以在这里分岔,弹窗和样式复用同一套
+    if (state.view === 'req') return renderReqSummary();
+
     const from = iso(weekStart());
     const to = iso(new Date(weekStart().getTime() + 6 * DAY));
 
@@ -767,6 +1319,137 @@
             }).join('')}
           </div>
         </div>`).join('')}`;
+  }
+
+  // ---------------------------------------------------------------- 需求汇总
+  //
+  // 和上面的周汇总同构:环形图 + 图例 + 明细。只是切分的口径从"按分类的时长"
+  // 换成"按组件的条数" —— 需求没有时长,能盘的就是数量和完成情况。
+  // 数据已经在 state 里,不用再取一次。
+  //
+  // 季度可以点着筛选:点某一季只看那一季上线的,再点一次回到全部。
+  // 筛选只在这个弹窗里生效,不动看板。
+  function renderReqSummary() {
+    const st = state.reqStats;
+    const body = el('sumBody');
+
+    if (!st || !st.total) {
+      el('sumTitle').textContent = '需求汇总';
+      body.innerHTML = '<p style="color:var(--text-faint);font-size:13px;padding:24px 0;text-align:center">还没有需求</p>';
+      return;
+    }
+
+    const quarters = st.quarters || [];
+    // 筛选的季度要是已经不存在了(数据变了),就当没筛
+    if (state.reqQuarter && !quarters.some((q) => q.label === state.reqQuarter)) {
+      state.reqQuarter = '';
+    }
+    const q = state.reqQuarter;
+
+    // 筛选后所有统计都要基于这批需求重算 —— 直接拿 st.components 会混进别的季度
+    const reqs = q ? state.requirements.filter((r) => r.quarter === q) : state.requirements;
+    const online = reqs.filter((r) => r.stage === 'online').length;
+    const pct = reqs.length ? (online / reqs.length) * 100 : 0;
+
+    el('sumTitle').textContent = q
+      ? `需求汇总 · ${q} · 已上线 ${online} 条`
+      : `需求汇总 · 已上线 ${online}/${reqs.length}`;
+
+    // 按组件分组。顺序跟组件维护列表一致,未指定组件的排最后
+    const byComp = new Map();
+    reqs.forEach((r) => {
+      const k = r.componentId || '';
+      if (!byComp.has(k)) byComp.set(k, []);
+      byComp.get(k).push(r);
+    });
+    const groups = [];
+    state.components.forEach((c) => {
+      const items = byComp.get(c.id);
+      if (items && items.length) groups.push({ id: c.id, name: c.name, color: c.color, items });
+    });
+    if (byComp.get('')) {
+      groups.push({ id: '', name: '未指定组件', color: 'var(--todo)', items: byComp.get('') });
+    }
+    // 兜底:组件列表没取到时不能让需求凭空消失,否则环形图会是一片空白
+    const covered = new Set(groups.map((g) => g.id));
+    byComp.forEach((items, id) => {
+      if (id && !covered.has(id)) {
+        groups.push({ id, name: compName(id), color: compColor(id), items });
+      }
+    });
+
+    let acc = 0;
+    const stops = groups.map((g) => {
+      const p = (g.items.length / reqs.length) * 100;
+      const a = acc, b = acc + p;
+      acc = b;
+      return `${g.color} ${a.toFixed(3)}% ${b.toFixed(3)}%`;
+    }).join(', ');
+
+    // 季度条按最大值归一,否则只有一个季度时永远满格看不出对比。
+    // 这一列始终列全部季度 —— 它是筛选控件本身,不能被自己筛掉
+    const maxQ = Math.max(...quarters.map((x) => x.online), 1);
+
+    body.innerHTML = `
+      <div class="sum-top">
+        <div class="donut-wrap">
+          <div class="donut" style="background:conic-gradient(${stops})"></div>
+          <div class="donut-center">
+            <div class="v">${reqs.length}<span>条</span></div>
+            <div class="k">${q ? esc(q) : '需求总数'}</div>
+          </div>
+        </div>
+        <div class="legend">
+          ${groups.map((g) => `
+            <div class="legend-row">
+              <i class="swatch" style="background:${g.color}"></i>
+              <span class="n">${esc(g.name)}</span>
+              <span class="h">${g.items.length} 条</span>
+              <span class="p">${((g.items.length / reqs.length) * 100).toFixed(0)}%</span>
+            </div>`).join('') || '<div class="legend-row empty"><span class="n">这个季度没有需求</span></div>'}
+        </div>
+      </div>
+      <p class="sum-note">${q
+        // 筛了季度就不报完成度了:这一季里的需求按定义都是已上线的,100% 是句废话
+        ? `共 ${reqs.length} 条`
+        : `已上线 ${online} 条 · 完成度 ${pct.toFixed(0)}%`}</p>
+
+      <div class="sum-title">按季度上线 · ${online} 条 <span class="sum-hint">点季度可以只看那一季</span></div>
+      ${quarters.length ? quarters.map((x) => `
+        <div class="q-row${x.label === q ? ' on' : ''}" data-q="${esc(x.label)}" title="${x.label === q ? '再看全部季度' : '只看 ' + x.label}">
+          <span class="q-name">${esc(x.label)}</span>
+          <span class="q-bar"><i style="width:${(x.online / maxQ) * 100}%"></i></span>
+          <span class="q-num">${x.online}</span>
+        </div>`).join('')
+        : '<p style="color:var(--text-faint);font-size:12.5px">还没有上线的需求</p>'}
+
+      <div class="sum-title">${q ? esc(q) + ' 明细' : '按组件明细'} · ${reqs.length} 条</div>
+      ${groups.map((g) => {
+        const on = g.items.filter((r) => r.stage === 'online').length;
+        return `
+        <div class="cat-group">
+          <div class="gh">
+            <i class="swatch" style="background:${g.color}"></i>
+            <b>${esc(g.name)}</b>
+            <span class="meta">${on}/${g.items.length} 已上线 · ${((on / g.items.length) * 100).toFixed(0)}%</span>
+          </div>
+          <div class="items">
+            ${g.items.map((r) => `
+              <div class="it">
+                <span class="t">${esc(r.title)}</span>
+                <span class="d">${esc(r.stageLabel)}</span>
+                <span class="h">${r.online ? r.online.slice(5) : r.start.slice(5) + ' 起'}</span>
+              </div>`).join('')}
+          </div>
+        </div>`;
+      }).join('')}`;
+
+    body.querySelectorAll('.q-row').forEach((row) => {
+      row.onclick = () => {
+        state.reqQuarter = row.dataset.q === state.reqQuarter ? '' : row.dataset.q;
+        renderReqSummary();
+      };
+    });
   }
 
   el('btnSummary').onclick = async () => { await renderSummary(); sumOverlay.hidden = false; };
@@ -847,9 +1530,19 @@
   el('prev').onclick = async () => { state.weekOffset--; await reload(); };
   el('next').onclick = async () => { state.weekOffset++; await reload(); };
   el('todayBtn').onclick = async () => { state.weekOffset = 0; await reload(); };
+
+  // 「新建」按当前视图走 —— 同一个按钮,两个视图里建的是两种东西
   el('btnNew').onclick = () => {
+    if (state.view === 'req') { openReqEdit(null); return; }
     const idx = Array.from({ length: 7 }, (_, i) => i).find(isToday);
     openEdit(null, idx != null ? idx : 0);
+  };
+
+  el('viewSwitch').onclick = (e) => {
+    const btn = e.target.closest('button');
+    if (!btn || btn.dataset.view === state.view) return;
+    state.view = btn.dataset.view;
+    renderAll(); // 高亮由 renderViewSwitch 统一负责
   };
 
   // ---------------------------------------------------------------- 状态视角
@@ -994,18 +1687,31 @@
     if (e.key !== 'Escape') return;
     if (!durOverlay.hidden) closeDur();
     else if (!sumOverlay.hidden) sumOverlay.hidden = true;
+    else if (!reqOverlay.hidden) reqOverlay.hidden = true;
     else if (!catOverlay.hidden) catOverlay.hidden = true;
     else if (!editOverlay.hidden) closeEdit();
   });
 
+  // 报错要让人看见。原先这里只 console.error + 写日志,界面上一声不吭 ——
+  // 保存失败的时候用户只会觉得"点了没反应",根本没有线索可循。
+  let toastTimer = null;
+  function showToast(text) {
+    const t = el('toast');
+    if (!t) return;
+    t.textContent = text;
+    t.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('on'), 5000);
+  }
+
   function reportError(prefix) {
     return (err) => {
       const msg = typeof err === 'string' ? err : (err?.message ?? String(err));
-      const t = el('toast') || document.createElement('div');
       console.error(prefix, msg);
       if (Go && typeof Go.ClientLog === 'function') {
         try { Go.ClientLog(`${prefix}: ${msg}`); } catch { /* ignore */ }
       }
+      showToast(`${prefix}:${msg}`);
     };
   }
 
@@ -1016,10 +1722,17 @@
   let reloadTimer = null;
   let reloadDeferred = false;
 
+  // 备注框有焦点时不要重画详情栏:中文输入法正在拼字,
+  // 节点一换拼音就丢了。离开时会补刷(见 noteText 的 onblur)
+  const noteBusy = () => {
+    const ta = document.getElementById('noteText');
+    return !!ta && document.activeElement === ta;
+  };
+
   // 拉一次数据,并把刷新按钮转一圈 —— 否则点了没反应,人不知道生效没有。
   async function refresh(force) {
     // 用户正在编辑就先不打断;关掉弹窗时 closeEdit 会自己刷一次
-    if (!force && !el('editOverlay').hidden) { reloadDeferred = true; return; }
+    if (!force && (editing() || noteBusy())) { reloadDeferred = true; return; }
     reloadDeferred = false;
 
     const btn = el('btnRefresh');
@@ -1033,13 +1746,47 @@
   // MCP 侧的写入也要能立刻看到:Claude 记完一条事项,窗口不该还停在旧数据上。
   // 合并短时间内的多次通知 —— 连着记三条不该刷三次。
   function scheduleReload() {
-    if (!el('editOverlay').hidden) { reloadDeferred = true; return; }
+    if (editing() || noteBusy()) { reloadDeferred = true; return; }
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(() => refresh(), 150);
   }
 
   el('btnRefresh').innerHTML = REFRESH;
   el('btnRefresh').onclick = () => refresh(true);
+
+  // ---------------------------------------------------------------- 走表
+  //
+  // 一秒一跳,只改文字和高度,不重画 —— 每秒重建一遍甘特图会把悬停、选中
+  // 这些状态全弄丢,而且那点活儿本来就是白干的。
+  //
+  // 数据仍然由 30 秒的轮询负责:这里只是把"正在跑"的那一段在两次取数之间
+  // 接着往下走,不改变任何口径。
+  function tickLive() {
+    if (state.view !== 'timeline') return;
+    const running = state.tasks.filter((t) => t.running);
+    if (!running.length) return;
+
+    document.querySelectorAll('[data-live]').forEach((node) => {
+      const t = running.find((x) => x.id === node.dataset.live);
+      if (!t) return;
+      const mins = liveMinutes(t);
+      const txt = node.dataset.fmt === 'sec' ? durSec(mins) : dur(Math.round(mins));
+      if (node.textContent !== txt) node.textContent = txt;
+    });
+
+    // 还在跑的那一块跟着长高。只处理今天那一列 —— 跨天的那半截起点在 0 点,
+    // 用同一个公式会算错
+    const today = iso(new Date());
+    document.querySelectorAll('[data-grow]').forEach((node) => {
+      if (node.dataset.day !== today) return;
+      if (!running.some((x) => x.id === node.dataset.grow)) return;
+      const n = new Date();
+      const end = n.getHours() * 60 + n.getMinutes() + n.getSeconds() / 60;
+      const pct = ((end - Number(node.dataset.startMin)) / 60 / state.span) * 100;
+      if (pct > 0) node.style.height = `calc(${pct}% - 3px)`;
+    });
+  }
+  setInterval(tickLive, 1000);
 
   // 兜底轮询:事件丢了、或者数据是被别的进程改的(比如另开了一个实例)时还有救
   setInterval(() => {

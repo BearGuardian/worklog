@@ -12,8 +12,15 @@
   <header class="topbar">
     <div class="brand">worklog <small>本地工作事项</small></div>
 
-    <div class="range-ctl">
-      <span class="lbl">时间轴</span>
+    <!-- 时间轴看"今天做了什么",需求看"这个季度在推什么"。两者数据不相干,
+         切过去就是把主区整个换掉,不是过滤同一批数据 -->
+    <div class="view-switch" id="viewSwitch">
+      <button data-view="timeline" class="on">时间轴</button>
+      <button data-view="req">需求</button>
+    </div>
+
+    <div class="range-ctl" id="rangeCtl" title="时间轴纵轴显示的小时范围">
+      <span class="lbl">范围</span>
       <label class="switch"><input type="checkbox" id="autoRange" checked><span>自动</span></label>
       <input type="number" id="hStart" min="0" max="23" value="9" disabled>
       <span class="dash">–</span>
@@ -29,24 +36,29 @@
 
     <span class="spacer"></span>
 
-    <button class="text-btn" id="btnSummary">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14">
-        <rect x="1.5" y="8" width="3" height="6.5" rx="1"/>
-        <rect x="6.5" y="4.5" width="3" height="10" rx="1"/>
-        <rect x="11.5" y="1.5" width="3" height="13" rx="1"/>
-      </svg>汇总</button>
-    <button class="text-btn" id="btnCats">分类</button>
-    <button class="icon-btn" id="btnRefresh" title="刷新"></button>
-    <button class="icon-btn" id="btnTheme" title="切换深浅色"></button>
+    <!-- 右侧这一组整体换行,不拆散。拆散的话窄窗口下会出现「+ 新建任务」
+         孤零零掉到第二行那种样子,看着像坏了 -->
+    <div class="topbar-right">
+      <button class="text-btn" id="btnSummary">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14">
+          <rect x="1.5" y="8" width="3" height="6.5" rx="1"/>
+          <rect x="6.5" y="4.5" width="3" height="10" rx="1"/>
+          <rect x="11.5" y="1.5" width="3" height="13" rx="1"/>
+        </svg>汇总</button>
+      <button class="text-btn" id="btnCats">分类</button>
+      <button class="text-btn" id="btnComps" hidden>组件</button>
+      <button class="icon-btn" id="btnRefresh" title="刷新"></button>
+      <button class="icon-btn" id="btnTheme" title="切换深浅色"></button>
 
-    <div class="week-nav">
-      <button class="icon-btn" id="prev" title="上一周">‹</button>
-      <div class="range" id="rangeLabel"></div>
-      <button class="icon-btn" id="next" title="下一周">›</button>
-      <button class="text-btn" id="todayBtn">今天</button>
+      <div class="week-nav" id="weekNav">
+        <button class="icon-btn" id="prev" title="上一周">‹</button>
+        <div class="range" id="rangeLabel"></div>
+        <button class="icon-btn" id="next" title="下一周">›</button>
+        <button class="text-btn" id="todayBtn">今天</button>
+      </div>
+
+      <button class="primary-btn" id="btnNew">+ 新建任务</button>
     </div>
-
-    <button class="primary-btn" id="btnNew">+ 新建任务</button>
   </header>
 
   <div class="stats" id="stats"></div>
@@ -58,12 +70,17 @@
     <button class="primary-btn" style="padding:6px 13px" id="mcpInstall" hidden>一键安装</button>
   </div>
 
-  <div class="main">
-    <section class="panel">
+  <div class="main" id="main">
+    <section class="panel" id="ganttPanel">
       <div class="gantt-head" id="ganttHead"></div>
       <div class="gantt-body" id="ganttBody"></div>
     </section>
     <aside class="panel detail" id="detail"></aside>
+    <!-- 需求看板。和时间轴是互斥的两个视图,靠 .main 上的 req-mode 切换 -->
+    <section class="panel reqs" id="reqPanel" hidden>
+      <div class="req-head" id="reqHead"></div>
+      <div class="req-body" id="reqBody"></div>
+    </section>
   </div>
 </div>
 
@@ -86,7 +103,7 @@
     <div class="row three">
       <label class="field"><span>日期</span><input type="date" id="fDate"></label>
       <label class="field"><span>开始</span><input type="time" id="fStart"></label>
-      <label class="field"><span>结束</span><input type="time" id="fEnd"></label>
+      <label class="field"><span>结束 <i class="opt">可不填</i></span><input type="time" id="fEnd"></label>
     </div>
 
     <div class="row">
@@ -104,7 +121,11 @@
       <button class="danger-btn" id="fDelete" hidden>删除</button>
       <span class="grow"></span>
       <button class="text-btn" id="fCancel">取消</button>
-      <button class="primary-btn" id="fSave">保存</button>
+      <button class="text-btn" id="fSave">保存</button>
+      <button class="primary-btn" id="fStartNow" title="存下来,并立刻开始计时">
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M4.5 2.8v10.4c0 .5.6.9 1 .6l8-5.2c.4-.3.4-.9 0-1.2l-8-5.2c-.4-.3-1 .1-1 .6z"/></svg>
+        开始计时
+      </button>
     </div>
   </div>
 </div>
@@ -119,6 +140,9 @@
       <label class="field"><span>小时</span><input type="number" id="durH" min="0" max="23"></label>
       <label class="field"><span>分钟</span><input type="number" id="durM" min="0" max="59" step="5"></label>
     </div>
+    <label class="field"><span>这段时间做了什么 <i class="opt">可不填</i></span>
+      <textarea id="durNote" rows="3" placeholder="会记到这条事项的备注里"></textarea>
+    </label>
     <div class="modal-foot">
       <span class="grow"></span>
       <button class="text-btn" id="durCancel">取消</button>
@@ -127,15 +151,55 @@
   </div>
 </div>
 
-<!-- 分类维护 -->
+<!-- 分类 / 组件维护。同一套 CRUD 界面,开的时候按 crudKind 换标题和文案 -->
 <div class="overlay" id="catOverlay" hidden>
   <div class="modal" style="width:520px">
-    <h3>分类</h3>
+    <h3 id="crudTitle">分类</h3>
     <div class="cat-list" id="catList"></div>
     <div class="modal-foot">
       <button class="text-btn" id="catAdd">+ 新增分类</button>
       <span class="grow"></span>
       <button class="primary-btn" id="catDone">完成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建 / 编辑需求 -->
+<div class="overlay" id="reqOverlay" hidden>
+  <div class="modal" style="width:520px">
+    <h3 id="reqTitle">新建需求</h3>
+
+    <label class="field"><span>需求</span>
+      <input id="rTitle" placeholder="一句话说清要做什么" autocomplete="off">
+    </label>
+
+    <div class="field"><span>组件</span>
+      <input id="rComp" placeholder="选一个,或输入新名字(会自动建)" autocomplete="off">
+      <div class="cat-picks" id="rCompPicks"></div>
+    </div>
+
+    <label class="field"><span>链接 <i class="opt">可不填</i></span>
+      <input id="rLink" placeholder="需求单 / 文档地址" autocomplete="off">
+    </label>
+
+    <label class="field"><span>内容 <i class="opt">可不填</i></span>
+      <textarea id="rDetail" rows="3" placeholder="需求要做什么、验收标准"></textarea>
+    </label>
+
+    <div class="row">
+      <label class="field"><span>阶段</span>
+        <select id="rStage"></select>
+      </label>
+      <label class="field"><span>上线时间 <i class="opt">填了就算上线</i></span>
+        <input type="date" id="rOnline">
+      </label>
+    </div>
+
+    <div class="modal-foot">
+      <button class="danger-btn" id="rDelete" hidden>删除</button>
+      <span class="grow"></span>
+      <button class="text-btn" id="rCancel">取消</button>
+      <button class="primary-btn" id="rSave">保存</button>
     </div>
   </div>
 </div>
@@ -153,6 +217,9 @@
 </div>
 <!-- 右键快捷菜单。同一个容器复用,每次打开时按目标重新填内容 -->
 <div class="ctx-menu" id="ctxMenu" hidden></div>
+
+<!-- 出错时的浮层提示。保存/删除失败必须让人看见 -->
+<div class="toast" id="toast"></div>
 
 <script src="app.js"></script>
 </body>
