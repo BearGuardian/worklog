@@ -240,8 +240,77 @@ func TestCreateTaskDefaults(t *testing.T) {
 	if out.Status != string(model.StatusTodo) {
 		t.Errorf("默认状态应当是 todo,实际 %s", out.Status)
 	}
-	if out.Start != "09:00" || out.End != "10:00" {
-		t.Errorf("默认区间应当是 09:00–10:00,实际 %s–%s", out.Start, out.End)
+	// 开始时间默认 09:00;结束不传就是"未定结束",不再是默认 +1 小时
+	if out.Start != "09:00" {
+		t.Errorf("默认开始应当是 09:00,实际 %s", out.Start)
+	}
+	if out.End != "" {
+		t.Errorf("不传 end 应当是未定结束(空串),实际 %q", out.End)
+	}
+}
+
+// 不传 end 建出来的事项是"未定结束":跨度零长,但照样能被列出来。
+func TestCreateTaskWithoutEndIsOpenEnded(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	_, out, err := s.createTask(ctx, nil, CreateTaskIn{Title: "还没想好做到几点"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.End != "" {
+		t.Errorf("TaskOut.End 应当是空串,实际 %q", out.End)
+	}
+
+	_, got, err := s.getTask(ctx, nil, GetTaskIn{ID: out.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Start != out.Start || got.End != "" {
+		t.Errorf("读回来应当还是未定结束,实际 %s–%s", got.Start, got.End)
+	}
+
+	// 零长跨度不该被当成错误而查不到
+	_, list, err := s.listTasks(ctx, nil, ListTasksIn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, t2 := range list {
+		if t2.ID == out.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("未定结束的事项应当照样能列出来")
+	}
+}
+
+// 未定结束的事项只改开始时刻,结束要跟着挪 —— 不挪会算出反向区间直接报错。
+func TestUpdateTaskMovesOpenEndWithStart(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	_, created, err := s.createTask(ctx, nil, CreateTaskIn{Title: "x", Start: "09:00"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, err := s.updateTask(ctx, nil, UpdateTaskIn{ID: created.ID, Start: "14:00"})
+	if err != nil {
+		t.Fatalf("未定结束的事项改开始时刻不该报错: %v", err)
+	}
+	if out.Start != "14:00" || out.End != "" {
+		t.Errorf("结束应当跟着起点走、仍是未定,实际 %s–%s", out.Start, out.End)
+	}
+
+	// 有真实结束时间的事项,改出反向区间仍然要报错
+	_, fixed, err := s.createTask(ctx, nil, CreateTaskIn{Title: "y", Start: "09:00", End: "10:00"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.updateTask(ctx, nil, UpdateTaskIn{ID: fixed.ID, Start: "18:00"}); err == nil {
+		t.Error("把开始改到结束之后应当报错")
 	}
 }
 
@@ -432,43 +501,60 @@ func TestWriteToolsNotify(t *testing.T) {
 		}
 
 		// add_note
-		if _, _, err := srv.addNote(ctx, nil, AddNoteIn{TaskID: first.ID, Text: "进展"}); err != nil {
+		_, note, err := srv.addNote(ctx, nil, AddNoteIn{TaskID: first.ID, Text: "进展"})
+		if err != nil {
 			t.Fatalf("add_note: %v", err)
 		}
 		if fired != 2 {
 			t.Errorf("add_note 后回调次数 = %d, 期望 2", fired)
 		}
 
+		// update_note
+		if _, _, err := srv.updateNote(ctx, nil, UpdateNoteIn{NoteID: note.ID, Text: "进展(改)"}); err != nil {
+			t.Fatalf("update_note: %v", err)
+		}
+		if fired != 3 {
+			t.Errorf("update_note 后回调次数 = %d, 期望 3", fired)
+		}
+
+		// delete_note
+		if _, _, err := srv.deleteNote(ctx, nil, DeleteNoteIn{NoteID: note.ID}); err != nil {
+			t.Fatalf("delete_note: %v", err)
+		}
+		if fired != 4 {
+			t.Errorf("delete_note 后回调次数 = %d, 期望 4", fired)
+		}
+
 		// start_task
 		if _, _, err := srv.startTask(ctx, nil, StartTaskIn{ID: first.ID}); err != nil {
 			t.Fatalf("start_task: %v", err)
 		}
-		if fired != 3 {
-			t.Errorf("start_task 后回调次数 = %d, 期望 3", fired)
+		if fired != 5 {
+			t.Errorf("start_task 后回调次数 = %d, 期望 5", fired)
 		}
 
 		// update_task
 		if _, _, err := srv.updateTask(ctx, nil, UpdateTaskIn{ID: first.ID, Title: "写代码(改)"}); err != nil {
 			t.Fatalf("update_task: %v", err)
 		}
-		if fired != 4 {
-			t.Errorf("update_task 后回调次数 = %d, 期望 4", fired)
+		if fired != 6 {
+			t.Errorf("update_task 后回调次数 = %d, 期望 6", fired)
 		}
 
 		// finish_task
 		if _, _, err := srv.finishTask(ctx, nil, FinishTaskIn{ID: first.ID, DurationMin: 45}); err != nil {
 			t.Fatalf("finish_task: %v", err)
 		}
-		if fired != 5 {
-			t.Errorf("finish_task 后回调次数 = %d, 期望 5", fired)
+		if fired != 7 {
+			t.Errorf("finish_task 后回调次数 = %d, 期望 7", fired)
 		}
 
 		// delete_task
 		if _, _, err := srv.deleteTask(ctx, nil, DeleteTaskIn{ID: first.ID}); err != nil {
 			t.Fatalf("delete_task: %v", err)
 		}
-		if fired != 6 {
-			t.Errorf("delete_task 后回调次数 = %d, 期望 6", fired)
+		if fired != 8 {
+			t.Errorf("delete_task 后回调次数 = %d, 期望 8", fired)
 		}
 	}
 
@@ -476,16 +562,97 @@ func TestWriteToolsNotify(t *testing.T) {
 	if _, _, err := srv.createTask(ctx, nil, CreateTaskIn{Title: "明天的事"}); err != nil {
 		t.Fatalf("create_task: %v", err)
 	}
-	if fired != 7 {
-		t.Errorf("create_task 后回调次数 = %d, 期望 7", fired)
+	if fired != 9 {
+		t.Errorf("create_task 后回调次数 = %d, 期望 9", fired)
 	}
 
 	// create_category
 	if _, _, err := srv.createCategory(ctx, nil, CreateCategoryIn{Name: "杂项"}); err != nil {
 		t.Fatalf("create_category: %v", err)
 	}
-	if fired != 8 {
-		t.Errorf("create_category 后回调次数 = %d, 期望 8", fired)
+	if fired != 10 {
+		t.Errorf("create_category 后回调次数 = %d, 期望 10", fired)
+	}
+}
+
+// 改备注要能读到新内容,并且标记成已编辑。
+func TestUpdateNoteTool(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	_, created, err := s.createTask(ctx, nil, CreateTaskIn{Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, note, err := s.addNote(ctx, nil, AddNoteIn{TaskID: created.ID, Text: "写错了"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.ID == "" {
+		t.Fatal("add_note 必须回传 note id —— 没有它就没法指名改哪一条")
+	}
+
+	if _, _, err := s.updateNote(ctx, nil, UpdateNoteIn{NoteID: note.ID, Text: "改好了"}); err != nil {
+		t.Fatalf("update_note: %v", err)
+	}
+
+	_, out, err := s.getTask(ctx, nil, GetTaskIn{ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Notes) != 1 {
+		t.Fatalf("应当有 1 条备注,实际 %d", len(out.Notes))
+	}
+	got := out.Notes[0]
+	if got.Text != "改好了" {
+		t.Errorf("应当读到改后的内容,实际 %q", got.Text)
+	}
+	if !got.Edited {
+		t.Error("改过之后 edited 应当为 true")
+	}
+	if got.ID != note.ID {
+		t.Errorf("ID 应当原样保留,实际 %q", got.ID)
+	}
+	if got.Who != "claude" {
+		t.Errorf("来源不该被改掉,实际 %q", got.Who)
+	}
+
+	// 空内容要被拒绝,而且原内容还在
+	if _, _, err := s.updateNote(ctx, nil, UpdateNoteIn{NoteID: note.ID, Text: "  "}); err == nil {
+		t.Error("改成空应当报错")
+	}
+	if _, out, _ := s.getTask(ctx, nil, GetTaskIn{ID: created.ID}); out.Notes[0].Text != "改好了" {
+		t.Errorf("被拒绝的改动不该生效,实际 %q", out.Notes[0].Text)
+	}
+}
+
+func TestDeleteNoteTool(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	_, created, err := s.createTask(ctx, nil, CreateTaskIn{Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, note, err := s.addNote(ctx, nil, AddNoteIn{TaskID: created.ID, Text: "删掉"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.deleteNote(ctx, nil, DeleteNoteIn{NoteID: note.ID}); err != nil {
+		t.Fatalf("delete_note: %v", err)
+	}
+
+	_, out, err := s.getTask(ctx, nil, GetTaskIn{ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Notes) != 0 {
+		t.Fatalf("删完应当没有备注,实际 %+v", out.Notes)
+	}
+
+	if _, _, err := s.deleteNote(ctx, nil, DeleteNoteIn{NoteID: note.ID}); err == nil {
+		t.Error("删已经删掉的应当报错")
 	}
 }
 
@@ -807,5 +974,231 @@ func TestAddSpanPromotesTodoToDoing(t *testing.T) {
 	}
 	if after.Status != string(model.StatusDone) {
 		t.Errorf("已完成的事项补记后应当仍是已完成,实际 %s", after.Status)
+	}
+}
+
+// ---------------------------------------------------------------- 需求
+
+func TestCreateRequirementDefaultsToSubmit(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, out, err := srv.createRequirement(context.Background(), nil, CreateRequirementIn{
+		Title: "告警分析 Agent 联调", Component: "axeops",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Stage != "submit" {
+		t.Errorf("默认阶段该是 submit,实际 %s", out.Stage)
+	}
+	if out.StageLabel != "需求提交" {
+		t.Errorf("阶段中文名该是 需求提交,实际 %s", out.StageLabel)
+	}
+	if out.OnlineAt != "" || out.Quarter != "" {
+		t.Errorf("新需求不该有上线时间和季度: %q / %q", out.OnlineAt, out.Quarter)
+	}
+	if out.Component != "axeops" {
+		t.Errorf("组件该自动建出来,实际 %q", out.Component)
+	}
+}
+
+// 填了上线时间就等于说它上线了 —— 阶段不用再单独传一遍。
+func TestCreateRequirementWithOnlineDate(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, out, err := srv.createRequirement(context.Background(), nil, CreateRequirementIn{
+		Title: "巡检报告导出", OnlineAt: "2026-10-15",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Stage != "online" {
+		t.Errorf("给了上线时间,阶段该是 online,实际 %s", out.Stage)
+	}
+	if out.OnlineAt != "2026-10-15" {
+		t.Errorf("上线时间该是 2026-10-15,实际 %q", out.OnlineAt)
+	}
+	if out.Quarter != "2026 Q4" {
+		t.Errorf("季度该是 2026 Q4,实际 %q", out.Quarter)
+	}
+}
+
+func TestUpdateRequirementStageToOnline(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	_, created, err := srv.createRequirement(ctx, nil, CreateRequirementIn{Title: "推进中的需求"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, err := srv.updateRequirement(ctx, nil, UpdateRequirementIn{ID: created.ID, Stage: "online"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Stage != "online" || out.OnlineAt == "" {
+		t.Errorf("切到 online 该自动记上线时间: stage=%s online_at=%q", out.Stage, out.OnlineAt)
+	}
+	if out.Quarter == "" {
+		t.Error("上线后该有季度")
+	}
+}
+
+// 中文阶段名也收 —— 模型很可能照着界面上的字写。
+func TestUpdateRequirementAcceptsChineseStage(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	_, created, err := srv.createRequirement(ctx, nil, CreateRequirementIn{Title: "中文阶段"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, out, err := srv.updateRequirement(ctx, nil, UpdateRequirementIn{ID: created.ID, Stage: "需求开发"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Stage != "dev" {
+		t.Errorf("「需求开发」该解析成 dev,实际 %s", out.Stage)
+	}
+}
+
+func TestUpdateRequirementRejectsBadStage(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	_, created, err := srv.createRequirement(ctx, nil, CreateRequirementIn{Title: "阶段写错"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.updateRequirement(ctx, nil, UpdateRequirementIn{ID: created.ID, Stage: "已上线"}); err == nil {
+		t.Error("认不出的阶段该报错,而不是静默忽略")
+	}
+}
+
+func TestListRequirementsByComponent(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	if _, _, err := srv.createRequirement(ctx, nil, CreateRequirementIn{Title: "甲", Component: "组件甲"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.createRequirement(ctx, nil, CreateRequirementIn{Title: "乙", Component: "组件乙"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, err := srv.listRequirements(ctx, nil, ListRequirementsIn{Component: "组件甲"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Title != "甲" {
+		t.Errorf("按组件过滤结果不对: %+v", out)
+	}
+
+	// 查一个不存在的组件返回空,不报错
+	_, none, err := srv.listRequirements(ctx, nil, ListRequirementsIn{Component: "没这个"})
+	if err != nil {
+		t.Fatalf("查不存在的组件不该报错: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("该是空,实际 %+v", none)
+	}
+}
+
+func TestRequirementReportByQuarter(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	for _, in := range []CreateRequirementIn{
+		{Title: "一", Component: "axeops", OnlineAt: "2026-10-05"},
+		{Title: "二", Component: "axeops", OnlineAt: "2026-12-20"},
+		{Title: "三", Component: "xdr"},
+	} {
+		if _, _, err := srv.createRequirement(ctx, nil, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, out, err := srv.requirementReport(ctx, nil, RequirementReportIn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Total != 3 || out.Online != 2 {
+		t.Fatalf("总数/上线数不对: %d / %d", out.Total, out.Online)
+	}
+	if len(out.Quarters) != 1 || out.Quarters[0].Quarter != "2026 Q4" || out.Quarters[0].Online != 2 {
+		t.Errorf("季度拆分不对: %+v", out.Quarters)
+	}
+
+	byName := map[string]ReqComponentOut{}
+	for _, c := range out.Components {
+		byName[c.Component] = c
+	}
+	if got := byName["axeops"]; got.Total != 2 || got.Online != 2 || got.Percent != 100 {
+		t.Errorf("axeops 该是 2/2 100%%,实际 %+v", got)
+	}
+	if got := byName["xdr"]; got.Total != 1 || got.Online != 0 {
+		t.Errorf("xdr 该是 0/1,实际 %+v", got)
+	}
+}
+
+func TestDeleteRequirementTool(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	_, created, err := srv.createRequirement(ctx, nil, CreateRequirementIn{Title: "要删的"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.deleteRequirement(ctx, nil, DeleteRequirementIn{ID: created.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, left, err := srv.listRequirements(ctx, nil, ListRequirementsIn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("删完该是空的,实际 %+v", left)
+	}
+}
+
+// 需求的写操作也要推刷新,读操作不能推 —— 和事项那套规则一致。
+func TestRequirementToolsNotify(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := context.Background()
+
+	var fired int
+	srv.SetOnChange(func() { fired++ })
+
+	_, created, err := srv.createRequirement(ctx, nil, CreateRequirementIn{Title: "会通知的需求"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fired != 1 {
+		t.Errorf("create_requirement 后回调次数 = %d, 期望 1", fired)
+	}
+
+	if _, _, err := srv.updateRequirement(ctx, nil, UpdateRequirementIn{ID: created.ID, Title: "改个名"}); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 2 {
+		t.Errorf("update_requirement 后回调次数 = %d, 期望 2", fired)
+	}
+
+	if _, _, err := srv.deleteRequirement(ctx, nil, DeleteRequirementIn{ID: created.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 3 {
+		t.Errorf("delete_requirement 后回调次数 = %d, 期望 3", fired)
+	}
+
+	if _, _, err := srv.listRequirements(ctx, nil, ListRequirementsIn{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.requirementReport(ctx, nil, RequirementReportIn{}); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 3 {
+		t.Errorf("读操作不该触发刷新,回调次数 = %d, 期望仍是 3", fired)
 	}
 }

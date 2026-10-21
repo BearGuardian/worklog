@@ -172,6 +172,17 @@ func (s *Server) registerTools(version string) {
 	}, s.addNote)
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name: "update_note",
+		Description: "改一条已经写下的备注。note_id 从 get_task 的 notes[].id 拿。" +
+			"只改内容,创建时刻不动 —— 备注在时间线上的位置由它决定。",
+	}, s.updateNote)
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "delete_note",
+		Description: "删掉一条备注。note_id 从 get_task 的 notes[].id 拿。",
+	}, s.deleteNote)
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "delete_task",
 		Description: "删除事项及其全部备注。",
 	}, s.deleteTask)
@@ -207,6 +218,33 @@ func (s *Server) registerTools(version string) {
 		Name:        "list_categories",
 		Description: "列出全部分类及其颜色。",
 	}, s.listCategories)
+
+	// ---- 需求。和时间轴上的事项是并列的两类东西,见 requirement.go
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "create_requirement",
+		Description: "记一条需求。开始时间就是此刻,不用传。",
+	}, s.createRequirement)
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "update_requirement",
+		Description: "改进度、补上线时间或改内容。切到 online 会自动记下上线时间。",
+	}, s.updateRequirement)
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "delete_requirement",
+		Description: "删除一条需求。",
+	}, s.deleteRequirement)
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "list_requirements",
+		Description: "按组件、阶段或关键词查询需求。",
+	}, s.listRequirements)
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name: "requirement_report",
+		Description: "需求完成情况汇总:总数、已上线数、按组件拆分的完成度、按季度拆分的上线数量。" +
+			"写季度汇报时先调它拿数据,文字由你自己组织。",
+	}, s.requirementReport)
 }
 
 // requireToken 校验 Authorization 头。

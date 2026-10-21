@@ -43,10 +43,14 @@ type SpanOut struct {
 }
 
 // NoteOut 是一条备注。
+//
+// ID 是给 update_note / delete_note 指名用的 —— 没有它 Claude 没法说"改哪一条"。
 type NoteOut struct {
-	Who  string `json:"who" jsonschema:"me 或 claude"`
-	At   string `json:"at" jsonschema:"HH:MM"`
-	Text string `json:"text" jsonschema:"内容"`
+	ID     string `json:"id" jsonschema:"备注 ID,改/删时用它指名"`
+	Who    string `json:"who" jsonschema:"me 或 claude"`
+	At     string `json:"at" jsonschema:"HH:MM"`
+	Text   string `json:"text" jsonschema:"内容"`
+	Edited bool   `json:"edited,omitempty" jsonschema:"改过没有"`
 }
 
 func toSpanOut(sp model.Span, now time.Time) SpanOut {
@@ -67,7 +71,7 @@ func toTaskOut(t model.Task) TaskOut {
 		Running:     t.Running(),
 		Date:        t.StartAt.Format("2006-01-02"),
 		Start:       t.StartAt.Format("15:04"),
-		End:         t.EndAt.Format("15:04"),
+		End:         spanEndText(t),
 		DurationMin: t.Minutes(now),
 		Confirmed:   t.Confirmed,
 	}
@@ -78,15 +82,32 @@ func toTaskOut(t model.Task) TaskOut {
 		o.Spans = append(o.Spans, toSpanOut(sp, now))
 	}
 	for _, n := range t.Notes {
-		who := "me"
-		if n.Source == model.SourceMCP {
-			who = "claude"
-		}
-		o.Notes = append(o.Notes, NoteOut{
-			Who: who, At: n.CreatedAt.Format("15:04"), Text: n.Body,
-		})
+		o.Notes = append(o.Notes, toNoteOut(n))
 	}
 	return o
+}
+
+// spanEndText 把跨度的结束时刻写成 HH:MM;**未定结束时返回空串**。
+//
+// 未定结束存的是零长区间(end == start),直接格式化会输出自相矛盾的
+// "09:00–09:00",看着像 bug。空串才如实表达"没有结束时间"。
+func spanEndText(t model.Task) string {
+	if !t.EndAt.After(t.StartAt) {
+		return ""
+	}
+	return t.EndAt.Format("15:04")
+}
+
+// toNoteOut 把一条备注转成给模型看的形态。Who 由 source 推出来 ——// Claude 自己写的那几条要能认出来,不然它会把自己的记录当成用户说的。
+func toNoteOut(n model.Note) NoteOut {
+	who := "me"
+	if n.Source == model.SourceMCP {
+		who = "claude"
+	}
+	return NoteOut{
+		ID: n.ID, Who: who, At: n.CreatedAt.Format("15:04"), Text: n.Body,
+		Edited: n.UpdatedAt != nil,
+	}
 }
 
 func toTaskOuts(ts []model.Task) []TaskOut {
@@ -269,7 +290,7 @@ type CreateTaskIn struct {
 	Status   string `json:"status,omitempty" jsonschema:"todo/doing/done,默认 todo"`
 	Date     string `json:"date,omitempty" jsonschema:"日期 YYYY-MM-DD,默认今天"`
 	Start    string `json:"start,omitempty" jsonschema:"开始 HH:MM,默认 09:00"`
-	End      string `json:"end,omitempty" jsonschema:"结束 HH:MM,默认开始后 1 小时"`
+	End      string `json:"end,omitempty" jsonschema:"结束 HH:MM。不传 = 未定结束(跨度只有起点)"`
 }
 
 func (s *Server) createTask(ctx context.Context, _ *mcp.CallToolRequest, in CreateTaskIn) (*mcp.CallToolResult, TaskOut, error) {
@@ -289,12 +310,14 @@ func (s *Server) createTask(ctx context.Context, _ *mcp.CallToolRequest, in Crea
 	if strings.TrimSpace(in.Start) == "" {
 		startMin = 9 * 60
 	}
-	endMin, err := parseClock(in.End)
-	if err != nil {
-		return nil, zero, err
-	}
-	if strings.TrimSpace(in.End) == "" {
-		endMin = startMin + 60
+	endMin := startMin
+	if strings.TrimSpace(in.End) != "" {
+		if endMin, err = parseClock(in.End); err != nil {
+			return nil, zero, err
+		}
+		if endMin < startMin {
+			return nil, zero, fmt.Errorf("结束时间不能早于开始时间")
+		}
 	}
 
 	status := model.StatusTodo
@@ -609,6 +632,11 @@ func (s *Server) updateTask(ctx context.Context, _ *mcp.CallToolRequest, in Upda
 				return nil, zero, err
 			}
 		}
+		// 现在就是"未定结束"(零长跨度)的事项,只改开始时刻时结束要**跟着挪**。
+		// 不挪的话 endMin 还是旧起点的那分钟,会算出 14:00–09:00 这种反向区间
+		// 直接报错 —— 而它的语义本来就是"起点在哪,没有终点"。
+		openEnd := cur.EndAt.Equal(cur.StartAt)
+
 		startMin := cur.StartAt.Hour()*60 + cur.StartAt.Minute()
 		endMin := cur.EndAt.Hour()*60 + cur.EndAt.Minute()
 		if strings.TrimSpace(in.Start) != "" {
@@ -620,6 +648,8 @@ func (s *Server) updateTask(ctx context.Context, _ *mcp.CallToolRequest, in Upda
 			if endMin, err = parseClock(in.End); err != nil {
 				return nil, zero, err
 			}
+		} else if openEnd {
+			endMin = startMin
 		}
 		ns, ne := atClock(day, startMin), atClock(day, endMin)
 		p.StartAt, p.EndAt = &ns, &ne
@@ -649,8 +679,40 @@ func (s *Server) addNote(ctx context.Context, _ *mcp.CallToolRequest, in AddNote
 		return nil, zero, err
 	}
 	s.notify()
-	out := NoteOut{Who: "claude", At: n.CreatedAt.Format("15:04"), Text: n.Body}
+	out := NoteOut{ID: n.ID, Who: "claude", At: n.CreatedAt.Format("15:04"), Text: n.Body}
 	return &mcp.CallToolResult{Content: say("已记下:%s", out.Text)}, out, nil
+}
+
+type UpdateNoteIn struct {
+	NoteID string `json:"note_id" jsonschema:"备注 ID,从 get_task 的 notes[].id 拿"`
+	Text   string `json:"text" jsonschema:"新的备注内容,不能为空"`
+}
+
+// updateNote 改一条已经写下的备注。
+//
+// 创建时刻不动 —— 备注在时间线上的位置由它决定,改内容不该让它跳位置。
+func (s *Server) updateNote(ctx context.Context, _ *mcp.CallToolRequest, in UpdateNoteIn) (*mcp.CallToolResult, NoteOut, error) {
+	var zero NoteOut
+	n, err := s.store.UpdateNote(in.NoteID, in.Text)
+	if err != nil {
+		return nil, zero, err
+	}
+	s.notify()
+	out := toNoteOut(*n)
+	return &mcp.CallToolResult{Content: say("已改成:%s", out.Text)}, out, nil
+}
+
+type DeleteNoteIn struct {
+	NoteID string `json:"note_id" jsonschema:"备注 ID,从 get_task 的 notes[].id 拿"`
+}
+
+// deleteNote 删掉一条备注。
+func (s *Server) deleteNote(ctx context.Context, _ *mcp.CallToolRequest, in DeleteNoteIn) (*mcp.CallToolResult, struct{}, error) {
+	if err := s.store.DeleteNote(in.NoteID); err != nil {
+		return nil, struct{}{}, err
+	}
+	s.notify()
+	return &mcp.CallToolResult{Content: say("已删除备注 %s", in.NoteID)}, struct{}{}, nil
 }
 
 type DeleteTaskIn struct {

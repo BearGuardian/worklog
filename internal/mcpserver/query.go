@@ -283,8 +283,12 @@ func (s *Server) registerResources() {
 				if t.Category != nil {
 					cat = t.Category.Name
 				}
-				fmt.Fprintf(&b, "- **%s** · %s · %s–%s\n",
-					t.Title, cat, t.StartAt.Format("15:04"), t.EndAt.Format("15:04"))
+				end := spanEndText(t)
+				if end != "" {
+					end = "–" + end
+				}
+				fmt.Fprintf(&b, "- **%s** · %s · %s%s\n",
+					t.Title, cat, t.StartAt.Format("15:04"), end)
 			}
 		}
 		return &mcp.ReadResourceResult{
