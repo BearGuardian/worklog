@@ -57,6 +57,7 @@ type TaskView struct {
 	End         string     `json:"end"`
 	StartMin    int        `json:"startMin"`
 	EndMin      int        `json:"endMin"`
+	OpenEnd     bool       `json:"openEnd"`     // 结束时间还没定(跨度零长)
 	DurationMin int        `json:"durationMin"` // 实际投入,即各段之和
 	Confirmed   bool       `json:"confirmed"`
 	Spans       []SpanView `json:"spans"`
@@ -80,10 +81,11 @@ type SpanView struct {
 }
 
 type NoteView struct {
-	ID   string `json:"id"`
-	Who  string `json:"who"` // me | claude
-	At   string `json:"at"`
-	Text string `json:"text"`
+	ID     string `json:"id"`
+	Who    string `json:"who"` // me | claude
+	At     string `json:"at"`
+	Text   string `json:"text"`
+	Edited bool   `json:"edited"` // 改过就显示"已编辑"
 }
 
 type CategoryView struct {
@@ -108,7 +110,10 @@ func toTaskView(t model.Task) TaskView {
 		EndMin:      t.EndAt.Hour()*60 + t.EndAt.Minute(),
 		DurationMin: t.Minutes(now),
 		Confirmed:   t.Confirmed,
-		Spans:       make([]SpanView, 0, len(t.Spans)),
+		// 只有"没有时段"的事项才可能出现零长跨度 —— syncEnvelope 给有时段的事项
+		// 兜了 +60。所以这里不用再看时段。
+		OpenEnd: len(t.Spans) == 0 && !t.EndAt.After(t.StartAt),
+		Spans:   make([]SpanView, 0, len(t.Spans)),
 	}
 
 	// 跨度按时段重算,并让还在跑的段延伸到此刻 —— 库里存的是写入时的值,
@@ -146,6 +151,7 @@ func toTaskView(t model.Task) TaskView {
 		}
 		v.Notes = append(v.Notes, NoteView{
 			ID: n.ID, Who: who, At: n.CreatedAt.Format("15:04"), Text: n.Body,
+			Edited: n.UpdatedAt != nil,
 		})
 	}
 	return v
@@ -228,12 +234,17 @@ func (a *App) SaveTask(in TaskInput) (*TaskView, error) {
 	if err != nil {
 		return nil, err
 	}
-	em, err := parseClock(in.End)
-	if err != nil {
-		return nil, err
-	}
-	if em <= sm {
-		return nil, fmt.Errorf("结束时间必须晚于开始时间")
+
+	// 结束时间可以不填 —— 空就是"还没定",跨度塌成零长区间 [start, start)。
+	// 填了才校验,而且只禁止反向(相等是合法的未定结束,见 store.CreateTask)。
+	em := sm
+	if strings.TrimSpace(in.End) != "" {
+		if em, err = parseClock(in.End); err != nil {
+			return nil, err
+		}
+		if em < sm {
+			return nil, fmt.Errorf("结束时间不能早于开始时间")
+		}
 	}
 
 	status := model.Status(strings.TrimSpace(in.Status))
@@ -273,7 +284,11 @@ func (a *App) SaveTask(in TaskInput) (*TaskView, error) {
 		return nil, err
 	}
 
-	if len(before.Spans) == 1 {
+	// 只有一段的事项:改时间就等于改那一段(保住单区间的旧手感)。
+	//
+	// 但结束时间留空时不走这条 —— 零长区间不是合法时段(ReplaceSpans 会拒),
+	// 而且人把结束清空表达的是"这条还没定结束",不该拿它去改写一段真实投入。
+	if len(before.Spans) == 1 && end.After(start) {
 		if err := a.store.ReplaceSpans(in.ID, start, end); err != nil {
 			return nil, err
 		}
@@ -368,8 +383,12 @@ func (a *App) DeleteSpan(spanID string) error { return a.store.DeleteSpan(spanID
 //
 // durationMin 是人在确认框里改过的值;<= 0 表示沿用自动算出的时长。
 // 给的值作用在**正在跑的那一段**上 —— 它就是这次投入,之前暂停过的段不动。
-// 确认后写一条备注留痕:用户改过的时长要能看出来。
-func (a *App) FinishTask(id string, durationMin int) (*TaskView, error) {
+//
+// note 是"这段时间做了什么",原样追加一条备注。确认框是结束这件事时唯一
+// 一次回看的机会,顺手记一句比事后再想起来补要可靠得多。
+//
+// 时长被改过时另外写一条留痕 —— 用户改过的值要能看出来。
+func (a *App) FinishTask(id string, durationMin int, note string) (*TaskView, error) {
 	cur, err := a.store.GetTask(id)
 	if err != nil {
 		return nil, err
@@ -428,6 +447,13 @@ func (a *App) FinishTask(id string, durationMin int) (*TaskView, error) {
 		return nil, err
 	}
 
+	// 先记人写的那句,再记自动留痕 —— 备注时间线按创建时刻排,
+	// 反过来的话"确认耗时"会排在人写的内容前面,读起来别扭
+	if n := strings.TrimSpace(note); n != "" {
+		if _, err := a.store.AddNote(id, n, model.SourceUI); err != nil {
+			return nil, err
+		}
+	}
 	if durationMin > 0 && durationMin != auto {
 		if _, err := a.store.AddNote(id,
 			fmt.Sprintf("确认耗时 %s(自动算出 %s)", durText(durationMin), durText(auto)),
@@ -446,6 +472,21 @@ func (a *App) AddNote(taskID, text string) (*TaskView, error) {
 	}
 	return a.GetTask(taskID)
 }
+
+// UpdateNote 改一条备注的正文,返回它所在的那条事项。
+//
+// 只改正文和 updated_at,创建时刻不动 —— 备注在时间线上的位置由创建时刻决定,
+// 改个错别字不该让它跳位置。
+func (a *App) UpdateNote(noteID, text string) (*TaskView, error) {
+	n, err := a.store.UpdateNote(noteID, text)
+	if err != nil {
+		return nil, err
+	}
+	return a.GetTask(n.TaskID)
+}
+
+// DeleteNote 删掉一条备注。界面删完自己重新拉数据,所以不返回事项 —— 和 DeleteSpan 一致。
+func (a *App) DeleteNote(noteID string) error { return a.store.DeleteNote(noteID) }
 
 // ---------------------------------------------------------------- 分类
 
@@ -502,6 +543,320 @@ func (a *App) SaveCategory(id, name, color string) (*CategoryView, error) {
 
 // DeleteCategory 删除分类。事项会退回未分类,不会被一起删掉。
 func (a *App) DeleteCategory(id string) error { return a.store.DeleteCategory(id) }
+
+// ---------------------------------------------------------------- 需求与组件
+
+// ComponentView 是组件给前端的形态。
+type ComponentView struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color"`
+	Count int    `json:"count"` // 被多少条需求使用
+}
+
+// RequirementView 是一条需求给前端的形态。
+//
+// 日期给字符串、季度直接给标签:前端不该自己去算"几月属于 Q几" ——
+// 那是一条业务规则,算两遍迟早不一致。
+type RequirementView struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	ComponentID string `json:"componentId"`
+	Link        string `json:"link"`
+	Detail      string `json:"detail"`
+	Stage       string `json:"stage"`
+	StageLabel  string `json:"stageLabel"`
+	StageIndex  int    `json:"stageIndex"` // 0 起,画进度条用
+	Start       string `json:"start"`      // YYYY-MM-DD,需求开始时间
+	Online      string `json:"online"`     // YYYY-MM-DD,空 = 还没上线
+	Quarter     string `json:"quarter"`    // "2026 Q4",空 = 还没上线
+	Source      string `json:"source"`
+}
+
+// StageView 是一个阶段的取值和显示名。
+type StageView struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+// ReqBoardView 是需求看板一次要的全部数据。
+//
+// 需求和统计一起返回:分成两次调用的话,统计永远比列表慢一拍,
+// 会出现"卡片上已经上线了、头部还写着没上线"的瞬间。
+type ReqBoardView struct {
+	Requirements []RequirementView `json:"requirements"`
+	Stats        ReqStatsView      `json:"stats"`
+}
+
+type ReqStatsView struct {
+	Total       int                `json:"total"`
+	Online      int                `json:"online"`
+	Percent     float64            `json:"percent"`
+	ThisQuarter int                `json:"thisQuarter"` // 本季度上线的数量
+	Components  []ReqComponentView `json:"components"`
+	Quarters    []ReqQuarterView   `json:"quarters"`
+}
+
+type ReqComponentView struct {
+	ID      string  `json:"id"`
+	Name    string  `json:"name"`
+	Color   string  `json:"color"`
+	Total   int     `json:"total"`
+	Online  int     `json:"online"`
+	Percent float64 `json:"percent"`
+}
+
+type ReqQuarterView struct {
+	Label  string `json:"label"` // "2026 Q4"
+	Online int    `json:"online"`
+}
+
+// RequirementInput 是新建/编辑需求的入参。ID 为空表示新建。
+//
+// Component 是**组件名**不是 ID —— 和事项的分类一样,输入不存在的名字自动建,
+// 记录的动作不该被"先去建组件"打断。
+type RequirementInput struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Component  string `json:"component"`
+	Link       string `json:"link"`
+	Detail     string `json:"detail"`
+	Stage      string `json:"stage"`
+	OnlineDate string `json:"onlineDate"` // YYYY-MM-DD,可空
+}
+
+func toRequirementView(r model.Requirement) RequirementView {
+	v := RequirementView{
+		ID:          r.ID,
+		Title:       r.Title,
+		ComponentID: r.ComponentID,
+		Link:        r.Link,
+		Detail:      r.Detail,
+		Stage:       string(r.Stage),
+		StageLabel:  r.Stage.Label(),
+		StageIndex:  r.Stage.Index(),
+		Start:       r.StartAt.Format("2006-01-02"),
+		Source:      string(r.Source),
+	}
+	if r.OnlineAt != nil {
+		v.Online = r.OnlineAt.Format("2006-01-02")
+		v.Quarter = model.QuarterLabel(*r.OnlineAt)
+	}
+	return v
+}
+
+// RequirementStages 返回阶段顺序,给界面画进度条。
+//
+// 顺序只在 model 里定义一次,前端不复制一份 —— 以后加一个阶段,
+// 界面跟着动,不用两边改。
+func (a *App) RequirementStages() []StageView {
+	stages := model.Stages()
+	out := make([]StageView, 0, len(stages))
+	for _, s := range stages {
+		out = append(out, StageView{Value: string(s), Label: s.Label()})
+	}
+	return out
+}
+
+// RequirementBoard 返回需求看板需要的全部数据:需求列表 + 完成情况汇总。
+func (a *App) RequirementBoard() (*ReqBoardView, error) {
+	reqs, err := a.store.ListRequirements(store.RequirementFilter{})
+	if err != nil {
+		return nil, err
+	}
+	st, err := a.store.RequirementStatsOf()
+	if err != nil {
+		return nil, err
+	}
+
+	v := &ReqBoardView{
+		Requirements: make([]RequirementView, 0, len(reqs)),
+		Stats: ReqStatsView{
+			Total:      st.Total,
+			Online:     st.Online,
+			Percent:    percentOf(st.Online, st.Total),
+			Components: make([]ReqComponentView, 0, len(st.Components)),
+			Quarters:   make([]ReqQuarterView, 0, len(st.Quarters)),
+		},
+	}
+	for _, r := range reqs {
+		v.Requirements = append(v.Requirements, toRequirementView(r))
+	}
+
+	thisQ := model.QuarterLabel(time.Now())
+	for _, c := range st.Components {
+		v.Stats.Components = append(v.Stats.Components, ReqComponentView{
+			ID: c.ComponentID, Name: c.Name, Color: c.Color,
+			Total: c.Total, Online: c.Online, Percent: c.Percent(),
+		})
+	}
+	for _, q := range st.Quarters {
+		label := fmt.Sprintf("%d Q%d", q.Year, q.Quarter)
+		if label == thisQ {
+			v.Stats.ThisQuarter = q.Online
+		}
+		v.Stats.Quarters = append(v.Stats.Quarters, ReqQuarterView{Label: label, Online: q.Online})
+	}
+	return v, nil
+}
+
+// percentOf 算完成度百分比。没有需求时是 0,不是 NaN。
+func percentOf(part, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(part) * 100 / float64(total)
+}
+
+// SaveRequirement 新建或更新需求。
+func (a *App) SaveRequirement(in RequirementInput) (*RequirementView, error) {
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		return nil, fmt.Errorf("需求标题不能为空")
+	}
+
+	stage := model.Stage(strings.TrimSpace(in.Stage))
+	if stage == "" {
+		stage = model.StageSubmit
+	}
+	if !stage.Valid() {
+		return nil, fmt.Errorf("需求阶段非法: %q", in.Stage)
+	}
+
+	// 组件按名字找,没有就建 —— 和事项分类同一套手感
+	comp, err := a.store.EnsureComponent(in.Component)
+	if err != nil {
+		return nil, err
+	}
+	compID := ""
+	if comp != nil {
+		compID = comp.ID
+	}
+
+	var online *time.Time
+	if d := strings.TrimSpace(in.OnlineDate); d != "" {
+		t, err := parseDay(d)
+		if err != nil {
+			return nil, err
+		}
+		online = &t
+	}
+
+	link, detail := strings.TrimSpace(in.Link), strings.TrimSpace(in.Detail)
+
+	if in.ID == "" {
+		r, err := a.store.CreateRequirement(model.Requirement{
+			Title: title, ComponentID: compID, Link: link, Detail: detail,
+			Stage: stage, OnlineAt: online, Source: model.SourceUI,
+		})
+		if err != nil {
+			return nil, err
+		}
+		v := toRequirementView(*r)
+		return &v, nil
+	}
+
+	r, err := a.store.UpdateRequirement(in.ID, store.RequirementPatch{
+		Title: &title, ComponentID: &compID, Link: &link, Detail: &detail,
+		Stage: &stage, OnlineAt: online,
+	})
+	if err != nil {
+		return nil, err
+	}
+	v := toRequirementView(*r)
+	return &v, nil
+}
+
+// SetRequirementStage 只改阶段 —— 卡片上点进度条走这条路,不用开弹窗。
+//
+// onlineDate 只在切到「需求上线」时才有意义,留空表示记成现在。
+func (a *App) SetRequirementStage(id, stage, onlineDate string) (*RequirementView, error) {
+	st := model.Stage(strings.TrimSpace(stage))
+	if !st.Valid() {
+		return nil, fmt.Errorf("需求阶段非法: %q", stage)
+	}
+
+	p := store.RequirementPatch{Stage: &st}
+	if d := strings.TrimSpace(onlineDate); d != "" {
+		t, err := parseDay(d)
+		if err != nil {
+			return nil, err
+		}
+		p.OnlineAt = &t
+	}
+
+	r, err := a.store.UpdateRequirement(id, p)
+	if err != nil {
+		return nil, err
+	}
+	v := toRequirementView(*r)
+	return &v, nil
+}
+
+// DeleteRequirement 删除需求。
+func (a *App) DeleteRequirement(id string) error { return a.store.DeleteRequirement(id) }
+
+// ListComponents 返回全部组件,附带被多少条需求使用。
+func (a *App) ListComponents() ([]ComponentView, error) {
+	comps, err := a.store.ListComponents()
+	if err != nil {
+		return nil, err
+	}
+
+	usage := map[string]int{}
+	reqs, err := a.store.ListRequirements(store.RequirementFilter{})
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range reqs {
+		if r.ComponentID != "" {
+			usage[r.ComponentID]++
+		}
+	}
+
+	out := make([]ComponentView, 0, len(comps))
+	for _, c := range comps {
+		out = append(out, ComponentView{ID: c.ID, Name: c.Name, Color: c.Color, Count: usage[c.ID]})
+	}
+	return out, nil
+}
+
+// SaveComponent 新建(ID 为空)或更新组件。
+func (a *App) SaveComponent(id, name, color string) (*ComponentView, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("组件名不能为空")
+	}
+
+	if id == "" {
+		c, err := a.store.CreateComponent(name, color)
+		if err != nil {
+			return nil, err
+		}
+		return &ComponentView{ID: c.ID, Name: c.Name, Color: c.Color}, nil
+	}
+
+	if err := a.store.UpdateComponent(id, name, color); err != nil {
+		return nil, err
+	}
+	c, err := a.store.GetComponent(id)
+	if err != nil || c == nil {
+		return nil, fmt.Errorf("组件不存在: %s", id)
+	}
+	return &ComponentView{ID: c.ID, Name: c.Name, Color: c.Color}, nil
+}
+
+// DeleteComponent 删除组件。需求会退回"未指定组件",不会被一起删掉。
+func (a *App) DeleteComponent(id string) error { return a.store.DeleteComponent(id) }
+
+// parseDay 把 YYYY-MM-DD 解析成本地时区的当天零点。
+func parseDay(s string) (time.Time, error) {
+	t, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(s), time.Local)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("日期格式不对: %q", s)
+	}
+	return t, nil
+}
 
 // ---------------------------------------------------------------- 汇总
 
@@ -710,6 +1065,22 @@ func (a *App) DataChanged() {
 // OpenDataDir 在资源管理器里打开数据目录。
 func (a *App) OpenDataDir() error {
 	return exec.Command("explorer", a.store.Dir()).Start()
+}
+
+// OpenURL 用系统默认浏览器打开需求上挂的链接。
+//
+// 只放行 http/https:这个串来自数据库,而需求内容是可以由 MCP 那边写进来的。
+// 不加这道限制,一条 file:// 或别的 scheme 就能让点击变成一次本地执行。
+func (a *App) OpenURL(url string) error {
+	if a.ctx == nil {
+		return fmt.Errorf("界面还没起来")
+	}
+	u := strings.TrimSpace(url)
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return fmt.Errorf("只支持 http/https 链接: %q", url)
+	}
+	runtime.BrowserOpenURL(a.ctx, u)
+	return nil
 }
 
 // ClientLog 接收前端的诊断日志。界面没有可见控制台,这是唯一的出口。
