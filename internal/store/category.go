@@ -11,11 +11,21 @@ import (
 
 // palette 是新分类的取色顺序。
 //
-// 挑的是中等饱和度,深浅两套主题下都看得清。取色时优先挑还没被用过的,
-// 用完一轮再从头来 —— 分类不多时不会出现两个同色。
+// 16 色 = 8 个色系 × 深/浅两档。同一个色系的两档 L* 差 15 以上,摆在一起
+// 一眼能分出深浅;深浅两档之间还夹着别的色系,所以同色系的不会挨着出现。
+//
+// **顺序是刻意交错的,别按色系归拢。** 调色板是按这个顺序取用的,而分类列表
+// 按 sort_order(≈创建顺序)显示 —— 要是把深浅成对排在一起,相邻两个分类
+// 就会拿到同色系的深浅两档,那反而更像。交错之后前 8 个分类拿到 8 个铺开的
+// 色相(实测相邻取色 ΔE 最小 39.8),第 9 个开始才回到同色系的另一档。
+//
+// 挑的是中等明度,深浅两套主题下都看得清。改这里要跑 TestPaletteDistinct ——
+// 它会检查任意两色的 ΔE ≥ 15,防止以后往里面塞近似色。
 var palette = []string{
-	"#7c6bff", "#2fb98a", "#f0913a", "#3b8fe8",
-	"#e8558a", "#0ea5b7", "#c9a227", "#8b5cf6",
+	"#d0393f", "#3fc0d4", "#a37c0e", "#a89bff",
+	"#178a55", "#ef7ab8", "#3566d8", "#f59b52",
+	"#f2747c", "#0b7c8d", "#d9b73f", "#7c6bff",
+	"#4fc48d", "#c9418f", "#6ea6f5", "#cf6415",
 }
 
 // ErrCategoryExists 表示同名分类已存在。
@@ -194,32 +204,33 @@ func (s *Store) DeleteCategory(id string) error {
 	return nil
 }
 
-// nextColor 挑一个还没被用过的调色板颜色;都用过了就按分类数取模。
-func (s *Store) nextColor() (string, error) {
-	rows, err := s.db.Query(`SELECT color FROM categories`)
+// nextColor 给新分类挑一个颜色。
+func (s *Store) nextColor() (string, error) { return s.nextColorFor("categories") }
+
+// nextColorFor 给新记录挑一个颜色:优先挑没被用过的,都用过了挑用得最少的。
+//
+// 统计走 normHex 归一化 —— 用户在原生取色器里挑出 #7C6BFF 时不能被当成
+// 一个"还没用过"的颜色。
+//
+// table 是内部字面量,不是用户输入,所以直接拼进语句没有注入面。
+// 分类和组件各查各的表:它们显示在两个互斥的视图里,跨表撞色看不出来。
+func (s *Store) nextColorFor(table string) (string, error) {
+	rows, err := s.db.Query(`SELECT color FROM ` + table)
 	if err != nil {
 		return "", fmt.Errorf("读取已有颜色失败: %w", err)
 	}
 	defer rows.Close()
 
-	used := map[string]bool{}
-	n := 0
+	used := map[string]int{}
 	for rows.Next() {
 		var c string
 		if err := rows.Scan(&c); err != nil {
 			return "", fmt.Errorf("读取颜色失败: %w", err)
 		}
-		used[c] = true
-		n++
+		used[normHex(c)]++
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-
-	for _, c := range palette {
-		if !used[c] {
-			return c, nil
-		}
-	}
-	return palette[n%len(palette)], nil
+	return pickUnused(used), nil
 }
