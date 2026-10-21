@@ -60,8 +60,12 @@ func (s *Store) CreateTask(t model.Task) (*model.Task, error) {
 	if !t.Status.Valid() {
 		return nil, fmt.Errorf("状态非法: %q", t.Status)
 	}
-	if !t.EndAt.After(t.StartAt) {
-		return nil, fmt.Errorf("结束时间必须晚于开始时间")
+	// 允许相等:**零长区间表示"结束时间还没定"**,不是错误。
+	// 跨度是半开区间 [start, end),end == start 就是"只有起点、终点未知"。
+	// 只有"没有时段"的事项会出现这种跨度 —— syncEnvelope 给有时段的事项
+	// 兜了 +60,不会塌成零长。见 DESIGN §7.3。
+	if t.EndAt.Before(t.StartAt) {
+		return nil, fmt.Errorf("结束时间不能早于开始时间")
 	}
 	if t.Source == "" {
 		t.Source = model.SourceUI
@@ -282,8 +286,9 @@ func (s *Store) UpdateTask(id string, p TaskPatch) (*model.Task, error) {
 	if p.EndAt != nil {
 		end = *p.EndAt
 	}
-	if !end.After(start) {
-		return nil, fmt.Errorf("结束时间必须晚于开始时间")
+	// 同上:相等 = 未定结束,只有反向才是错的
+	if end.Before(start) {
+		return nil, fmt.Errorf("结束时间不能早于开始时间")
 	}
 
 	sets := []string{"updated_at = ?"}
@@ -388,7 +393,7 @@ func (s *Store) AddNote(taskID, body string, source model.Source) (*model.Note, 
 // 正好落在这个窗口里,顺序错乱看着就是"备注乱了"。
 func (s *Store) NotesOf(taskID string) ([]model.Note, error) {
 	rows, err := s.db.Query(
-		`SELECT id, task_id, body, source, created_at FROM notes
+		`SELECT id, task_id, body, source, created_at, updated_at FROM notes
 		 WHERE task_id = ? ORDER BY created_at, rowid`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("查询备注失败: %w", err)
@@ -399,13 +404,77 @@ func (s *Store) NotesOf(taskID string) ([]model.Note, error) {
 	for rows.Next() {
 		var n model.Note
 		var created int64
-		if err := rows.Scan(&n.ID, &n.TaskID, &n.Body, &n.Source, &created); err != nil {
+		var updated *int64
+		if err := rows.Scan(&n.ID, &n.TaskID, &n.Body, &n.Source, &created, &updated); err != nil {
 			return nil, fmt.Errorf("读取备注失败: %w", err)
 		}
 		n.CreatedAt = fromUnix(created)
+		if updated != nil {
+			t := fromUnix(*updated)
+			n.UpdatedAt = &t
+		}
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// GetNote 取单条备注。
+func (s *Store) GetNote(id string) (*model.Note, error) {
+	var n model.Note
+	var created int64
+	var updated *int64
+	err := s.db.QueryRow(
+		`SELECT id, task_id, body, source, created_at, updated_at FROM notes WHERE id = ?`, id).
+		Scan(&n.ID, &n.TaskID, &n.Body, &n.Source, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("备注不存在: %s", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询备注失败: %w", err)
+	}
+	n.CreatedAt = fromUnix(created)
+	if updated != nil {
+		t := fromUnix(*updated)
+		n.UpdatedAt = &t
+	}
+	return &n, nil
+}
+
+// UpdateNote 改一条备注的正文。
+//
+// **只动 body 和 updated_at,CreatedAt 一概不动** —— 备注在时间线上的位置
+// 由创建时刻决定,改内容不该让它跳位置。updated_at 是留痕:没有它的话,
+// 一条被改过的备注和原始记录长得一模一样。
+//
+// 拒绝空内容,和 AddNote 一致。**不能**把"改成空"当成删除:删除有独立入口
+// (要点那个 ×),手滑清空输入框不该丢掉一条记录。
+func (s *Store) UpdateNote(id, body string) (*model.Note, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, fmt.Errorf("备注内容不能为空")
+	}
+
+	res, err := s.db.Exec(
+		`UPDATE notes SET body = ?, updated_at = ? WHERE id = ?`, body, unix(nowFunc()), id)
+	if err != nil {
+		return nil, fmt.Errorf("改写备注失败: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("备注不存在: %s", id)
+	}
+	return s.GetNote(id)
+}
+
+// DeleteNote 删掉一条备注。
+func (s *Store) DeleteNote(id string) error {
+	res, err := s.db.Exec(`DELETE FROM notes WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("删除备注失败: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("备注不存在: %s", id)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------- 内部

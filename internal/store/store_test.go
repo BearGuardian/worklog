@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -215,7 +216,6 @@ func TestCreateTaskValidation(t *testing.T) {
 	}{
 		{"空标题", model.Task{StartAt: at(15, 9, 0), EndAt: at(15, 10, 0), Status: model.StatusTodo}},
 		{"区间反了", model.Task{Title: "x", StartAt: at(15, 10, 0), EndAt: at(15, 9, 0), Status: model.StatusTodo}},
-		{"零长度", model.Task{Title: "x", StartAt: at(15, 9, 0), EndAt: at(15, 9, 0), Status: model.StatusTodo}},
 		{"状态非法", model.Task{Title: "x", StartAt: at(15, 9, 0), EndAt: at(15, 10, 0), Status: "nope"}},
 	}
 	for _, c := range cases {
@@ -364,8 +364,116 @@ func TestNotesOrdered(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------- 汇总
+// 改备注只动正文和 updated_at,**创建时刻一概不动**。
+//
+// 时间线上那条备注的位置由创建时刻决定 —— 改个错别字不该让"下午三点记的那条"
+// 跳到"晚上七点",那时间线就没意义了。
+func TestUpdateNoteKeepsCreatedAt(t *testing.T) {
+	s := newTestStore(t)
+	task := mustTask(t, s, "带备注的事", at(15, 9, 0), at(15, 10, 0), "")
 
+	// 用整秒的时间:库里的时间戳精度就是秒,带纳秒的 now 往返之后会被截掉
+	created := time.Date(2026, 10, 15, 9, 0, 0, 0, time.Local)
+	nowFunc = func() time.Time { return created }
+	defer func() { nowFunc = time.Now }()
+
+	n, err := s.AddNote(task.ID, "写错了", model.SourceUI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.UpdatedAt != nil {
+		t.Errorf("刚写的备注不该有 updated_at")
+	}
+
+	edited := created.Add(2 * time.Hour)
+	nowFunc = func() time.Time { return edited }
+
+	got, err := s.UpdateNote(n.ID, "  改好了  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body != "改好了" {
+		t.Errorf("正文应当 trim 后写入,实际 %q", got.Body)
+	}
+	if !got.CreatedAt.Equal(created) {
+		t.Errorf("创建时刻不该变:%v → %v", created, got.CreatedAt)
+	}
+	if got.UpdatedAt == nil {
+		t.Fatal("改过之后应当有 updated_at")
+	}
+	if !got.UpdatedAt.Equal(edited) {
+		t.Errorf("updated_at 应当是改动时刻 %v,实际 %v", edited, got.UpdatedAt)
+	}
+
+	// 读回来的也要带上
+	notes, err := s.NotesOf(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || notes[0].UpdatedAt == nil {
+		t.Errorf("NotesOf 应当带回 updated_at,实际 %+v", notes)
+	}
+}
+
+// 改成空不算删除 —— 手滑清空输入框不该丢掉一条记录。
+func TestUpdateNoteRejectsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	task := mustTask(t, s, "带备注的事", at(15, 9, 0), at(15, 10, 0), "")
+	n, err := s.AddNote(task.ID, "原来的内容", model.SourceUI)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{"", "   ", "\n\t "} {
+		if _, err := s.UpdateNote(n.ID, bad); err == nil {
+			t.Errorf("空内容 %q 应当被拒绝", bad)
+		}
+	}
+
+	after, err := s.GetNote(n.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Body != "原来的内容" {
+		t.Errorf("被拒绝的改动不该生效,实际 %q", after.Body)
+	}
+	if after.UpdatedAt != nil {
+		t.Errorf("被拒绝的改动不该留下 updated_at,实际 %v", after.UpdatedAt)
+	}
+
+	if _, err := s.UpdateNote("没这个id", "x"); err == nil {
+		t.Error("改不存在的备注应当报错")
+	}
+}
+
+func TestDeleteNote(t *testing.T) {
+	s := newTestStore(t)
+	task := mustTask(t, s, "带备注的事", at(15, 9, 0), at(15, 10, 0), "")
+	keep, err := s.AddNote(task.ID, "留着", model.SourceUI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop, err := s.AddNote(task.ID, "删掉", model.SourceUI)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteNote(drop.ID); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := s.NotesOf(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || notes[0].ID != keep.ID {
+		t.Fatalf("应当只剩第一条,实际 %+v", notes)
+	}
+	if err := s.DeleteNote(drop.ID); err == nil {
+		t.Error("删已经删掉的应当报错")
+	}
+}
+
+// ---------------------------------------------------------------- 汇总
 // 并行计时的核心口径:求和会重复计算重叠部分,并集不会。
 func TestUnionMinutes(t *testing.T) {
 	cases := []struct {
@@ -646,6 +754,8 @@ func writeV1DB(t *testing.T, dir string) {
 		{"t-done", "做完的", "done", base.Add(time.Hour)},
 		{"t-doing", "在做", "doing", base.Add(30 * time.Minute)},
 		{"t-todo", "待办", "todo", base.Add(2 * time.Hour)},
+		// 未定结束(零长跨度)的进行中事项:不该被回填出假时段
+		{"t-open", "还没定几点结束", "doing", base},
 	}
 	for _, r := range rows {
 		if _, err := db.Exec(ins, r.id, r.title, r.status,
@@ -669,8 +779,8 @@ func TestMigrateV1ToV2BackfillsSpans(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
 		t.Fatal(err)
 	}
-	if ver != 2 {
-		t.Fatalf("版本应当升到 2,实际 %d", ver)
+	if ver != schemaVersion {
+		t.Fatalf("版本应当升到 %d,实际 %d", schemaVersion, ver)
 	}
 
 	now := time.Now()
@@ -710,6 +820,72 @@ func TestMigrateV1ToV2BackfillsSpans(t *testing.T) {
 	if d := todo.Duration(now); d != 0 {
 		t.Errorf("待办时长应当为 0,实际 %v", d)
 	}
+
+	// 未定结束(零长跨度)的进行中事项:也不回填。
+	// 回填的话会造出一段零长的"实际投入",而它根本没计过时。
+	open, err := s.GetTask("t-open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open.Spans) != 0 {
+		t.Errorf("零长跨度的事项不该被回填时段,实际 %d 段", len(open.Spans))
+	}
+}
+
+// 零长跨度 = 未定结束,是合法的,不是"区间填反了"。
+func TestCreateTaskAllowsOpenEnd(t *testing.T) {
+	s := newTestStore(t)
+	day := at(15, 9, 0)
+
+	task, err := s.CreateTask(model.Task{
+		Title: "还没想好做到几点", StartAt: day, EndAt: day, Status: model.StatusTodo,
+	})
+	if err != nil {
+		t.Fatalf("未定结束应当能建: %v", err)
+	}
+	if !task.EndAt.Equal(task.StartAt) {
+		t.Errorf("跨度应当是零长,实际 %v → %v", task.StartAt, task.EndAt)
+	}
+
+	// 照样能按日期列出来 —— 过滤只看 start_at,零长不影响
+	from, to := at(15, 0, 0), at(16, 0, 0)
+	list, err := s.ListTasks(TaskFilter{From: &from, To: &to})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != task.ID {
+		t.Fatalf("未定结束的事项应当能被列出,实际 %d 条", len(list))
+	}
+
+	// 反向才是错的
+	if _, err := s.CreateTask(model.Task{
+		Title: "反了", StartAt: at(15, 10, 0), EndAt: at(15, 9, 0), Status: model.StatusTodo,
+	}); err == nil {
+		t.Error("结束早于开始应当报错")
+	}
+}
+
+func TestUpdateTaskAllowsOpenEnd(t *testing.T) {
+	s := newTestStore(t)
+	task := mustTask(t, s, "x", at(15, 9, 0), at(15, 10, 0), "")
+
+	day := at(15, 9, 0)
+	if _, err := s.UpdateTask(task.ID, TaskPatch{EndAt: &day}); err != nil {
+		t.Fatalf("把结束改成和开始一样(未定结束)应当允许: %v", err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.EndAt.Equal(got.StartAt) {
+		t.Errorf("跨度应当塌成零长,实际 %v → %v", got.StartAt, got.EndAt)
+	}
+
+	// 反向仍然拒绝
+	earlier := at(15, 8, 0)
+	if _, err := s.UpdateTask(task.ID, TaskPatch{EndAt: &earlier}); err == nil {
+		t.Error("结束早于开始应当报错")
+	}
 }
 
 // 已经是 v2 的库再打开一次不该重复回填
@@ -734,6 +910,213 @@ func TestMigrateV2IsIdempotent(t *testing.T) {
 	after, _ := s2.GetTask("t-done")
 	if len(after.Spans) != n {
 		t.Errorf("二次打开不该重复回填:%d → %d", n, len(after.Spans))
+	}
+}
+
+// writeV2DB 造一个 v2 版本的库,里面塞进三类分类配色:
+// 正常不撞的、精确重复的、以及"看着一样但字符串不同"的。
+func writeV2DB(t *testing.T, dir string) {
+	t.Helper()
+	writeV1DB(t, dir)
+
+	dsn := "file:" + filepath.ToSlash(filepath.Join(dir, "worklog.db"))
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("打开裸库失败: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("建 v2 表失败: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatalf("写版本号失败: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM categories`); err != nil {
+		t.Fatalf("清空分类失败: %v", err)
+	}
+
+	const ins = `INSERT INTO categories (id, name, color, sort_order, created_at)
+	             VALUES (?,?,?,?,0)`
+	cats := []struct{ id, name, color string }{
+		{"c1", "需求编写", "#7c6bff"}, // 先出现的紫,保留
+		{"c2", "会议", "#3b8fe8"},   // 和谁都不撞,保留
+		{"c3", "问题排查", "#8b5cf6"}, // 和老紫 ΔE 只有 9.1,看着一样 —— 要换
+		{"c4", "部署日常", "#3b8fe8"}, // 精确重复 —— 要换
+		{"c5", "运营优化", "#c9a227"}, // 不撞,保留
+	}
+	for i, c := range cats {
+		if _, err := db.Exec(ins, c.id, c.name, c.color, i); err != nil {
+			t.Fatalf("插入分类失败: %v", err)
+		}
+	}
+}
+
+func TestMigrateV2ToV3DedupesCategoryColors(t *testing.T) {
+	dir := t.TempDir()
+	writeV2DB(t, dir)
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("打开 v2 库失败: %v", err)
+	}
+	defer s.Close()
+
+	var ver int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatal(err)
+	}
+	if ver != schemaVersion {
+		t.Fatalf("版本应当升到 %d,实际 %d", schemaVersion, ver)
+	}
+
+	cats, err := s.ListCategories()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cats) != 5 {
+		t.Fatalf("分类数不该变,期望 5,实际 %d", len(cats))
+	}
+
+	byID := map[string]string{}
+	for _, c := range cats {
+		byID[c.ID] = c.Color
+	}
+
+	// 不撞的原样保留 —— 迁移不该顺手重排用户的整个配色
+	for _, id := range []string{"c1", "c2", "c5"} {
+		if byID[id] != map[string]string{"c1": "#7c6bff", "c2": "#3b8fe8", "c5": "#c9a227"}[id] {
+			t.Errorf("%s 的颜色不该被改,实际 %s", id, byID[id])
+		}
+	}
+	// 撞的两个必须换掉
+	if byID["c3"] == "#8b5cf6" {
+		t.Errorf("c3 和老紫看着一样,应当被换掉")
+	}
+	if byID["c4"] == "#3b8fe8" {
+		t.Errorf("c4 是精确重复,应当被换掉")
+	}
+
+	// 换完两两都得拉开
+	for i := 0; i < len(cats); i++ {
+		for j := i + 1; j < len(cats); j++ {
+			if d := colorDist(cats[i].Color, cats[j].Color); d < colorMinDist {
+				t.Errorf("%s(%s) 和 %s(%s) 仍然太接近:ΔE = %.1f",
+					cats[i].Name, cats[i].Color, cats[j].Name, cats[j].Color, d)
+			}
+		}
+	}
+}
+
+// 已经是 v3 的库再打开一次不该重复改写配色
+func TestMigrateV3IsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	writeV2DB(t, dir)
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.ListCategories()
+	s.Close()
+
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("二次打开失败: %v", err)
+	}
+	defer s2.Close()
+
+	after, _ := s2.ListCategories()
+	if len(before) != len(after) {
+		t.Fatalf("分类数变了:%d → %d", len(before), len(after))
+	}
+	for i := range before {
+		if before[i].Color != after[i].Color {
+			t.Errorf("%s 的颜色在二次打开时被改了:%s → %s",
+				before[i].Name, before[i].Color, after[i].Color)
+		}
+	}
+}
+
+// writeV3DB 造一个 v3 版本的库,带几条备注。
+//
+// v3 没有 DDL(它只改分类配色数据),所以表结构和 v2 一样,
+// 差别只在 user_version。
+func writeV3DB(t *testing.T, dir string) {
+	t.Helper()
+	writeV2DB(t, dir)
+
+	dsn := "file:" + filepath.ToSlash(filepath.Join(dir, "worklog.db"))
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("打开裸库失败: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatalf("写版本号失败: %v", err)
+	}
+	for i, b := range []string{"第一条备注", "第二条备注"} {
+		if _, err := db.Exec(
+			`INSERT INTO notes (id, task_id, body, source, created_at) VALUES (?,?,?,'ui',?)`,
+			fmt.Sprintf("n%d", i), "t-done", b, 1000+i); err != nil {
+			t.Fatalf("插入备注失败: %v", err)
+		}
+	}
+}
+
+func TestMigrateV3ToV4AddsUpdatedAt(t *testing.T) {
+	dir := t.TempDir()
+	writeV3DB(t, dir)
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("打开 v3 库失败: %v", err)
+	}
+	defer s.Close()
+
+	var ver int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		t.Fatal(err)
+	}
+	if ver != schemaVersion {
+		t.Fatalf("版本应当升到 %d,实际 %d", schemaVersion, ver)
+	}
+
+	notes, err := s.NotesOf("t-done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 2 {
+		t.Fatalf("备注一条都不该丢,期望 2,实际 %d", len(notes))
+	}
+	for _, n := range notes {
+		if n.UpdatedAt != nil {
+			t.Errorf("老备注没被改过,updated_at 该是空,实际 %v", n.UpdatedAt)
+		}
+	}
+}
+
+// 新建分类时,用户手动挑的 #7C6BFF 不能被当成"还没用过"的色 ——
+// 大小写归一化没做的话,这里会挑出一个看着重复的颜色。
+func TestNextColorIgnoresHexCase(t *testing.T) {
+	s := newTestStore(t)
+	// 把种子分类全删掉,自己造两个:一个手动大写、一个走自动
+	if _, err := s.db.Exec(`DELETE FROM categories`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO categories (id,name,color,sort_order,created_at) VALUES (?,?,?,0,0)`,
+		"cx", "手动挑的", "#7C6BFF"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.nextColor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normHex(got) == "#7c6bff" {
+		t.Errorf("大写形式的 #7C6BFF 已被占用,不该再挑出 %s", got)
 	}
 }
 

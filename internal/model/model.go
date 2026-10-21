@@ -1,7 +1,10 @@
 // Package model 定义 worklog 的核心数据结构。
 package model
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Status 是事项的状态。
 type Status string
@@ -149,10 +152,127 @@ func (t Task) Running() bool {
 }
 
 // Note 是挂在事项上的一条备注。
+//
+// UpdatedAt 为 nil 表示从没改过。改动**不动 CreatedAt** —— 备注在时间线上的
+// 位置由它决定,改个错别字不该让"下午三点记的那条"跳到"晚上七点"。
 type Note struct {
+	ID        string     `json:"id"`
+	TaskID    string     `json:"taskId"`
+	Body      string     `json:"body"`
+	Source    Source     `json:"source"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
+}
+
+// ---------------------------------------------------------------- 需求
+
+// Stage 是需求的执行阶段。
+//
+// 存英文、显示中文,和 Status 一个路子 —— 库里是稳定的标识符,界面上是给人看的字。
+type Stage string
+
+const (
+	StageSubmit  Stage = "submit"  // 需求提交
+	StageClarify Stage = "clarify" // 需求澄清
+	StageDev     Stage = "dev"     // 需求开发
+	StageAccept  Stage = "accept"  // 需求验收
+	StageOnline  Stage = "online"  // 需求上线
+)
+
+// stageOrder 是阶段从早到晚的排列,进度条和"到哪一步了"都按它来。
+//
+// 顺序只在这里写一遍:再散落到界面和统计里,加一个阶段就得改好几处。
+var stageOrder = []Stage{StageSubmit, StageClarify, StageDev, StageAccept, StageOnline}
+
+var stageLabels = map[Stage]string{
+	StageSubmit:  "需求提交",
+	StageClarify: "需求澄清",
+	StageDev:     "需求开发",
+	StageAccept:  "需求验收",
+	StageOnline:  "需求上线",
+}
+
+// Valid 报告阶段是否是五个合法值之一。
+func (s Stage) Valid() bool {
+	_, ok := stageLabels[s]
+	return ok
+}
+
+// Label 返回阶段的中文名。非法值原样返回,便于排查。
+func (s Stage) Label() string {
+	if l, ok := stageLabels[s]; ok {
+		return l
+	}
+	return string(s)
+}
+
+// Index 返回阶段在顺序里的下标(0 起)。非法值返回 -1。
+func (s Stage) Index() int {
+	for i, v := range stageOrder {
+		if v == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// Stages 返回全部阶段的顺序副本,供界面画进度条。
+func Stages() []Stage {
+	out := make([]Stage, len(stageOrder))
+	copy(out, stageOrder)
+	return out
+}
+
+// Component 是需求的归属组件。
+//
+// 和 Category 是**两套维度**:分类说的是"这是什么性质的工作"(开发/会议/运维),
+// 组件说的是"属于哪个东西"(axeops / xdr)。硬合成一个维度会让事项的分类下拉里
+// 混进一堆组件名,所以宁可多一张表。
+type Component struct {
 	ID        string    `json:"id"`
-	TaskID    string    `json:"taskId"`
-	Body      string    `json:"body"`
-	Source    Source    `json:"source"`
+	Name      string    `json:"name"`
+	Color     string    `json:"color"`
+	SortOrder int       `json:"sortOrder"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// Requirement 是一条需求。
+//
+// 和 Task 是两种东西:事项记的是"今天几点做了什么",需求记的是"这个季度在推什么"。
+// 需求从提交到上线跨周跨月,没有时段、没有时长。
+//
+// StartAt 就是**添加时间** —— 建的时候是什么时候,这条需求就是什么时候开始的。
+// OnlineAt 为 nil 表示还没上线。
+type Requirement struct {
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	ComponentID string     `json:"componentId,omitempty"` // 空表示未指定组件
+	Link        string     `json:"link,omitempty"`
+	Detail      string     `json:"detail,omitempty"` // 需求内容
+	Stage       Stage      `json:"stage"`
+	StartAt     time.Time  `json:"startAt"`
+	OnlineAt    *time.Time `json:"onlineAt,omitempty"`
+	Source      Source     `json:"source"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+
+	// 查询时按需填充,不是 requirements 表的列。
+	Component *Component `json:"component,omitempty"`
+}
+
+// Online 报告这条需求是否已上线。
+//
+// 它就是 stage == StageOnline —— online_at 有没有值必须和它一致,
+// 这个不变量由 store 统一维护(见 store.applyStage)。
+func (r Requirement) Online() bool { return r.Stage == StageOnline }
+
+// Quarter 返回 t 所属的季度,1–4。
+//
+// 季度是**算出来的**,不落库:它和 online_at 之间是确定性的换算,
+// 存一份就多一处能对不上的地方。
+func Quarter(t time.Time) int { return (int(t.Month())-1)/3 + 1 }
+
+// QuarterLabel 把时刻写成 "2026 Q4" 这样的季度标签。
+func QuarterLabel(t time.Time) string {
+	return fmt.Sprintf("%d Q%d", t.Year(), Quarter(t))
 }
